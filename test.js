@@ -685,7 +685,7 @@ _error('[Upload] startFolderUpload 失敗:', err);
 // ==================== UI 工具函數 ====================
 
 function getStoredFolders() {
-try { return GM_getValue('scanned_folders', []); } catch(e) { return []; }
+  try { var v = GM_getValue('scanned_folders', []); return Array.isArray(v) ? v : []; } catch(e) { return []; }
 }
 
 function applySelectStyle(select, width) {
@@ -770,7 +770,7 @@ return select;
 }
 
 function getLocalFolders() {
-try { return GM_getValue('local_folders', ['Waiting Create']); } catch(e) { return ['Waiting Create']; }
+  try { var v = GM_getValue('local_folders', ['Waiting Create']); return Array.isArray(v) ? v : ['Waiting Create']; } catch(e) { return ['Waiting Create']; }
 }
 
 function saveLocalFolders(folders) {
@@ -786,20 +786,20 @@ defaultOption.textContent = 'Unsorted';
 defaultOption.selected = true;
 select.appendChild(defaultOption);
 var folders = getStoredFolders();
-folders.forEach(function(folder) {
-var option = document.createElement('option');
-option.value = folder;
-option.textContent = folder;
-select.appendChild(option);
-});
-var separator = document.createElement('option');
-separator.value = '';
-separator.textContent = '-----Local Folder-----';
-separator.disabled = true;
-separator.style.cssText = 'font-weight: bold; color: #5C0D12;';
-select.appendChild(separator);
-var localFolders = getLocalFolders();
-localFolders.forEach(function(folder) {
+  folders.forEach(function(folder) {
+  var option = document.createElement('option');
+  option.value = folder;
+  option.textContent = folder;
+  select.appendChild(option);
+  });
+  var separator = document.createElement('option');
+  separator.value = '';
+  separator.textContent = '-----Local Folder-----';
+  separator.disabled = true;
+  separator.style.cssText = 'font-weight: bold; color: #5C0D12;';
+  select.appendChild(separator);
+  var localFolders = getLocalFolders();
+  localFolders.forEach(function(folder) {
 var option = document.createElement('option');
 option.value = 'local:' + folder;
 option.textContent = folder;
@@ -3153,7 +3153,7 @@ container.appendChild(body);
 var selectedId = null;
 var isNew = false;
 
-function getTemplates() { try { return GM_getValue('comment_templates', []); } catch(e) { return []; } }
+function getTemplates() { try { var v = GM_getValue('comment_templates', []); return Array.isArray(v) ? v : []; } catch(e) { return []; } }
 function saveTemplates(arr) { try { GM_setValue('comment_templates', arr); } catch(e) { _error('[CommentTemplate] 保存失敗:', e); } }
 
 function syncAllGroupDropdowns() {
@@ -4031,9 +4031,9 @@ var gmKeys = [
 'create_success'
 ];
 gmKeys.forEach(function(key) {
-try { GM_setValue(key, null); } catch(err) { _error('[ClearCache] GM_setValue 失敗:', key, err); }
-});
-_log('[ClearCache] GM 數據已清除');
+  try { GM_deleteValue(key); } catch(err) { _error('[ClearCache] GM_deleteValue 失敗:', key, err); }
+  });
+  _log('[ClearCache] GM 數據已清除');
 var dbReq = indexedDB.deleteDatabase('FIFYBUJ_DB');
 dbReq.onsuccess = function() {
 _log('[ClearCache] IndexedDB 已刪除');
