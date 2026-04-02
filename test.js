@@ -1712,7 +1712,8 @@ noneOpt.textContent = '----------None----------';
 tplSelect.appendChild(noneOpt);
 var existingTemplates = [];
 try { existingTemplates = GM_getValue('comment_templates', []); } catch(e) {}
-existingTemplates.forEach(function(tpl) {
+    if (!existingTemplates || !Array.isArray(existingTemplates)) { existingTemplates = []; }
+    existingTemplates.forEach(function(tpl) {
 var opt = document.createElement('option');
 opt.value = tpl.id;
 opt.textContent = tpl.name;
@@ -2050,7 +2051,8 @@ timestamp: Date.now()
 try {
 var existingGalleries = GM_getValue('saved_galleries', []);
 if (savedDataId) { existingGalleries = existingGalleries.filter(function(g) { return g.id !== savedDataId; }); }
-existingGalleries.push(galleryData);
+  if (!Array.isArray(existingGalleries)) { existingGalleries = []; }
+  existingGalleries.push(galleryData);
 GM_setValue('saved_galleries', existingGalleries);
 savedDataId = galleryData.id;
 tr2.dataset.savedDataId = savedDataId;
@@ -2058,8 +2060,8 @@ saveCommentBtn.style.backgroundColor = '#999999';
 saveCommentBtn.style.color = '#CCCCCC';
 saveCommentBtn.style.borderColor = '#999999';
 setTimeout(function() { saveCommentBtn.style.backgroundColor = '#E0DED3'; saveCommentBtn.style.color = '#5C0D12'; saveCommentBtn.style.borderColor = '#5C0D12'; }, 500);
-var panel = document.querySelector('.show-file-list-container');
-if (panel && panel.refreshPanel) panel.refreshPanel();
+console.log('[Save] 已靜默保存畫廊:', galleryData.id, galleryData.title1);
+_log('[Save] 已靜默保存畫廊:', galleryData.id, galleryData.title1);
 } catch(error) { _error('Save failed:', error); }
 });
 uploaderRow.appendChild(saveCommentBtn);
@@ -4143,8 +4145,9 @@ optionsRowDiv.style.cssText = 'padding: 3px 4px; background-color: #E0DED3; bord
 
 var optionsLeft = document.createElement('div');
 optionsLeft.style.cssText = 'display: grid !important; grid-template-areas: "cg cl sp off tra rew dig dec ai" "cg cl sp col tex inc sam ong ant" !important; grid-template-columns: max-content max-content 1fr max-content max-content max-content max-content max-content max-content !important; grid-template-rows: auto auto !important; column-gap: 8px !important; row-gap: 2px !important; align-items: center !important; width: 100% !important;';
+optionsLeft.style.cssText = 'display: grid !important; grid-template-areas: "cg as cl sp off tra rew dig dec ai" "cg as cl sp col tex inc sam ong ant" !important; grid-template-columns: max-content max-content max-content 1fr max-content max-content max-content max-content max-content max-content !important; grid-template-rows: auto auto !important; column-gap: 8px !important; row-gap: 2px !important; align-items: center !important; width: 100% !important;';
 
-var createGalleryBtn2 = document.createElement('button');
+  var createGalleryBtn2 = document.createElement('button');
 createGalleryBtn2.innerHTML = 'Create<br>Gallery';
 createGalleryBtn2.style.cssText = 'background-color: #E0DED3; border: 1px solid #5C0D12; color: #5C0D12; font-weight: bold; font-size: 8pt; padding: 0 4px; cursor: pointer; border-radius: 3px; white-space: normal; box-sizing: border-box; text-align: center; grid-area: cg; align-self: stretch; word-break: keep-all; line-height: 1.4; width: 100%;';
 createGalleryBtn2.addEventListener('click', function(e) {
@@ -4228,8 +4231,19 @@ cbOpt_officialCb.addEventListener('click', function() { if (!cbOpt_translatedCb.
 cbOpt_translatedCb.addEventListener('click', function() { if (!cbOpt_officialCb.checked && !cbOpt_rewriteCb.checked) { this.checked = true; return; } cbOpt_officialCb.checked = false; cbOpt_rewriteCb.checked = false; cbOpt_mtlInner.style.visibility = 'visible'; cbOpt_mtlCb.checked = true; });
 cbOpt_rewriteCb.addEventListener('click', function() { if (!cbOpt_officialCb.checked && !cbOpt_translatedCb.checked) { this.checked = true; return; } cbOpt_officialCb.checked = false; cbOpt_translatedCb.checked = false; cbOpt_mtlInner.style.visibility = 'hidden'; cbOpt_mtlCb.checked = false; });
 
-optionsLeft.appendChild(createGalleryBtn2); optionsLeft.appendChild(cleanBtn); optionsLeft.appendChild(spacer);
-optionsLeft.appendChild(cbOpt_official); optionsLeft.appendChild(cbOpt_translatedWrap); optionsLeft.appendChild(cbOpt_rewrite);
+  var allSaveBtn = document.createElement('button');
+  allSaveBtn.innerHTML = 'All<br>Save';
+  allSaveBtn.style.cssText = 'background-color: #E0DED3; border: 1px solid #5C0D12; color: #5C0D12; font-weight: bold; font-size: 8pt; padding: 0 4px; cursor: pointer; border-radius: 3px; white-space: normal; box-sizing: border-box; text-align: center; grid-area: as; align-self: stretch; word-break: keep-all; line-height: 1.4;';
+  allSaveBtn.addEventListener('click', function(e) {
+    e.preventDefault();
+    document.querySelectorAll('button').forEach(function(btn) {
+      if (btn.textContent === 'save' && btn.closest('tr') && btn.closest('tr').dataset.savedDataId) {
+        btn.dispatchEvent(new MouseEvent('click', { bubbles: false, cancelable: true }));
+      }
+    });
+  });
+  optionsLeft.appendChild(createGalleryBtn2); optionsLeft.appendChild(allSaveBtn); optionsLeft.appendChild(cleanBtn); optionsLeft.appendChild(spacer);
+  optionsLeft.appendChild(cbOpt_official); optionsLeft.appendChild(cbOpt_translatedWrap); optionsLeft.appendChild(cbOpt_rewrite);
 optionsLeft.appendChild(cbOpt_digital); optionsLeft.appendChild(cbOpt_decensored); optionsLeft.appendChild(cbOpt_aiGenerated);
 optionsLeft.appendChild(cbOpt_colorized); optionsLeft.appendChild(cbOpt_textless); optionsLeft.appendChild(cbOpt_incomplete);
 optionsLeft.appendChild(cbOpt_sample); optionsLeft.appendChild(cbOpt_ongoing); optionsLeft.appendChild(cbOpt_anthology);
@@ -4892,9 +4906,7 @@ GM_setValue('create_success', null);
 function init() {
 try {
     var _ud = GM_getValue('user_dicts', {});
-    console.log('[DIAG] user_dicts keys:', JSON.stringify(Object.keys(_ud)));
-    console.log('[DIAG] user_dicts sample:', JSON.stringify(_ud).substring(0, 300));
-} catch(e) { console.log('[DIAG] error:', e.message); }
+} catch(e) {}
 _log('=== 庫載入檢查 ===');
 _log('JSZip:', typeof JSZip);
 _log('Kuroshiro:', typeof Kuroshiro);
