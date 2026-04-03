@@ -4,9 +4,9 @@
 // @version 9.00
 // @description 函數化 + Setting面板 + 標題自動附加 + 偵錯
 // @author You
-// @match https://upload.e-hentai.org/manage
-// @match https://upload.e-hentai.org/managefolders
-// @match https://upload.e-hentai.org/managegallery*
+// @match https://upload.f-ifybuj1.psh/manage
+// @match https://upload.f-ifybuj1.psh/managefolders
+// @match https://upload.f-ifybuj1.psh/managegallery*
 // @grant GM_getValue
 // @grant GM_setValue
 // @grant GM_deleteValue
@@ -556,7 +556,7 @@ var pendingUpload = { ulgid: ulgid, savedDataId: data.savedDataId };
 GM_setValue('pending_upload', pendingUpload);
 _log('[AutoCreate] pending_upload 已儲存，準備跳轉');
 setTimeout(function() {
-window.location.href = 'https://upload.e-hentai.org/managegallery?ulgid=' + ulgid;
+window.location.href = 'https://upload.f-ifybuj1.psh/managegallery?ulgid=' + ulgid;
 }, 800);
 } else {
 _warn('[AutoCreate] 無法取得 ulgid，跳過上傳');
@@ -1003,7 +1003,7 @@ pendingQueue.push(pendingData);
 
 if (pendingQueue.length > 0) {
 GM_setValue('pending_create_queue', pendingQueue);
-pendingQueue.forEach(function() { GM_openInTab('https://upload.e-hentai.org/managegallery?act=new', { active: false }); });
+pendingQueue.forEach(function() { GM_openInTab('https://upload.f-ifybuj1.psh/managegallery?act=new', { active: false }); });
 }
 }
 
@@ -2104,7 +2104,7 @@ anthology: cbAnthology.checkbox.checked, ongoing: cbOngoing.checkbox.checked
 }
 };
 GM_setValue('pending_create', pendingData);
-GM_openInTab('https://upload.e-hentai.org/managegallery?act=new', { active: false });
+GM_openInTab('https://upload.f-ifybuj1.psh/managegallery?act=new', { active: false });
 } catch(err) { _error('+ 按鈕錯誤:', err.message); }
 });
 td2_6.appendChild(plusBtn);
