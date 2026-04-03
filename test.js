@@ -9,6 +9,7 @@
 // @match https://upload.e-hentai.org/managegallery*
 // @grant GM_getValue
 // @grant GM_setValue
+// @grant GM_deleteValue
 // @grant GM_openInTab
 // @grant GM_addValueChangeListener
 // @grant GM_xmlhttpRequest
@@ -42,9 +43,9 @@ function _logToPanel(level, args) {
     if (_consolePanel && _consolePanel.addEntry) _consolePanel.addEntry(time, level, msg);
 }
 
-function _log() { console.log.apply(console, arguments); _logToPanel('INFO', arguments); }
-function _error() { console.error.apply(console, arguments); _logToPanel('ERROR', arguments); }
-function _warn() { console.warn.apply(console, arguments); _logToPanel('WARN', arguments); }
+function _log() { if (currentSettings && currentSettings.logToBrowserConsole) { console.log.apply(console, arguments); } _logToPanel('INFO', arguments); }
+function _error() { if (currentSettings && currentSettings.logToBrowserConsole) { console.error.apply(console, arguments); } _logToPanel('ERROR', arguments); }
+function _warn() { if (currentSettings && currentSettings.logToBrowserConsole) { console.warn.apply(console, arguments); } _logToPanel('WARN', arguments); }
 
 // ==================== 默認設置 ====================
 
@@ -2060,7 +2061,6 @@ saveCommentBtn.style.backgroundColor = '#999999';
 saveCommentBtn.style.color = '#CCCCCC';
 saveCommentBtn.style.borderColor = '#999999';
 setTimeout(function() { saveCommentBtn.style.backgroundColor = '#E0DED3'; saveCommentBtn.style.color = '#5C0D12'; saveCommentBtn.style.borderColor = '#5C0D12'; }, 500);
-console.log('[Save] 已靜默保存畫廊:', galleryData.id, galleryData.title1);
 _log('[Save] 已靜默保存畫廊:', galleryData.id, galleryData.title1);
 } catch(error) { _error('Save failed:', error); }
 });
@@ -4017,28 +4017,31 @@ saveSettingsBtn.textContent = '已保存 ✓';
 setTimeout(function() { saveSettingsBtn.textContent = '保存設置'; }, 1500);
 });
 var clearCacheBtn = document.createElement('button');
-clearCacheBtn.textContent = '清空緩存';
-clearCacheBtn.style.cssText = 'background-color: #8B0000; color: #FFFFFF; border: none; border-radius: 3px; padding: 4px 16px; cursor: pointer; font-size: 9pt; font-weight: bold; margin-right: auto;';
+clearCacheBtn.textContent = '清理緩存';
+clearCacheBtn.style.cssText = 'background-color: #8B0000; color: #FFFFFF; border: none; border-radius: 3px; padding: 4px 16px; cursor: pointer; font-size: 9pt; font-weight: bold; margin-right: 8px;';
 clearCacheBtn.addEventListener('mouseenter', function() { this.style.backgroundColor = '#A00000'; });
 clearCacheBtn.addEventListener('mouseleave', function() { this.style.backgroundColor = '#8B0000'; });
 clearCacheBtn.addEventListener('click', function(e) {
 e.preventDefault();
-var msg1 = '確認要清空所有緩存嗎？\n\n將刪除以下內容：\n• 已保存的圖庫資料\n• 文件列表\n• 評論模板\n• 掃描的文件夾\n• 本地文件夾\n• 腳本設置\n• 字典緩存（Kuromoji / EhTag）\n• 根目錄授權\n• 所有待處理任務';
+var msg1 = '確認要清理緩存嗎？\n\n將刪除以下內容：\n• 已保存的圖庫資料\n• 文件列表\n• 評論模板\n• 掃描的文件夾\n• 本地文件夾授權\n• 所有待處理任務\n• 外部字典緩存\n\n將保留：\n• 腳本設置\n• 本地自定義字典';
 if (!confirm(msg1)) return;
 if (!confirm('二次確認：所有資料將永久刪除，無法復原。確定繼續？')) return;
 var gmKeys = [
 'saved_galleries', 'file_lists', 'comment_templates',
-'scanned_folders', 'local_folders', 'fifybuj_settings',
+'scanned_folders', 'local_folders',
+'scanned_folders', 'local_folders',
 'pending_create', 'pending_create_queue', 'pending_upload',
 'create_success'
 ];
 gmKeys.forEach(function(key) {
-  try { GM_deleteValue(key); } catch(err) { _error('[ClearCache] GM_deleteValue 失敗:', key, err); }
+  GM_deleteValue(key);
   });
   _log('[ClearCache] GM 數據已清除');
 var dbReq = indexedDB.deleteDatabase('FIFYBUJ_DB');
 dbReq.onsuccess = function() {
 _log('[ClearCache] IndexedDB 已刪除');
+var unpublishedSection = document.querySelector('.s[data-custom="true"]');
+if (unpublishedSection) unpublishedSection.remove();
 clearCacheBtn.textContent = '已清空 ✓';
 clearCacheBtn.style.backgroundColor = '#007700';
 setTimeout(function() {
@@ -4065,7 +4068,84 @@ clearCacheBtn.style.backgroundColor = '#8B0000';
 }, 3000);
 };
 });
+
+var resetDictBtn = document.createElement('button');
+resetDictBtn.textContent = '重置字典';
+resetDictBtn.style.cssText = 'background-color: #8B4500; color: #FFFFFF; border: none; border-radius: 3px; padding: 4px 16px; cursor: pointer; font-size: 9pt; font-weight: bold; margin-right: 8px;';
+resetDictBtn.addEventListener('mouseenter', function() { this.style.backgroundColor = '#A05000'; });
+resetDictBtn.addEventListener('mouseleave', function() { this.style.backgroundColor = '#8B4500'; });
+resetDictBtn.addEventListener('click', function(e) {
+e.preventDefault();
+var msg1 = '確認要重置字典嗎？\n\n將刪除以下內容：\n• 外部字典緩存\n\n下次使用羅馬字轉換時將自動重新下載。\n\n將保留：\n• 所有用戶數據\n• 腳本設置\n• 本地自定義字典';
+if (!confirm(msg1)) return;
+if (!confirm('二次確認：此操作無法復原。確定繼續？')) return;
+var dbReq = indexedDB.deleteDatabase('FIFYBUJ_DB');
+dbReq.onsuccess = function() {
+_log('[ResetDict] IndexedDB 已刪除');
+resetDictBtn.textContent = '已重置 ✓';
+resetDictBtn.style.backgroundColor = '#007700';
+setTimeout(function() {
+resetDictBtn.textContent = '重置字典';
+resetDictBtn.style.backgroundColor = '#8B4500';
+}, 2000);
+};
+dbReq.onerror = function(ev) {
+_error('[ResetDict] IndexedDB 刪除失敗:', ev.target.error);
+resetDictBtn.textContent = '重置失敗';
+resetDictBtn.style.backgroundColor = '#CC0000';
+setTimeout(function() {
+resetDictBtn.textContent = '重置字典';
+resetDictBtn.style.backgroundColor = '#8B4500';
+}, 2000);
+};
+dbReq.onblocked = function() {
+_warn('[ResetDict] IndexedDB 刪除被阻擋，請關閉其他分頁後重試');
+resetDictBtn.textContent = '請關閉其他分頁';
+resetDictBtn.style.backgroundColor = '#CC6600';
+setTimeout(function() {
+resetDictBtn.textContent = '重置字典';
+resetDictBtn.style.backgroundColor = '#8B4500';
+}, 3000);
+};
+});
+
 saveRow.appendChild(clearCacheBtn);
+saveRow.appendChild(resetDictBtn);
+
+var resetSettingsBtn = document.createElement('button');
+resetSettingsBtn.textContent = '重置設置';
+resetSettingsBtn.style.cssText = 'background-color: #5C6B00; color: #FFFFFF; border: none; border-radius: 3px; padding: 4px 16px; cursor: pointer; font-size: 9pt; font-weight: bold; margin-left: 8px; margin-right: auto;';
+resetSettingsBtn.addEventListener('mouseenter', function() { this.style.backgroundColor = '#6E7F00'; });
+resetSettingsBtn.addEventListener('mouseleave', function() { this.style.backgroundColor = '#5C6B00'; });
+resetSettingsBtn.addEventListener('click', function(e) {
+e.preventDefault();
+var msg1 = '確認要重置設置嗎？\n\n將刪除本地設置並還原至默認值。\n\n將保留：\n• 已保存的圖庫資料\n• 本地自定義字典\n• 外部字典緩存';
+if (!confirm(msg1)) return;
+if (!confirm('二次確認：此操作無法復原。確定繼續？')) return;
+try {
+GM_deleteValue('fifybuj_settings');
+var defaultSettings = getDefaultSettings();
+GM_setValue('fifybuj_settings', defaultSettings);
+_log('[ResetSettings] 設置已重置為默認值');
+resetSettingsBtn.textContent = '已重置 ✓';
+resetSettingsBtn.style.backgroundColor = '#007700';
+setTimeout(function() {
+resetSettingsBtn.textContent = '重置設置';
+resetSettingsBtn.style.backgroundColor = '#5C6B00';
+window.location.reload();
+}, 2000);
+} catch(err) {
+_error('[ResetSettings] 重置失敗:', err);
+resetSettingsBtn.textContent = '重置失敗';
+resetSettingsBtn.style.backgroundColor = '#CC0000';
+setTimeout(function() {
+resetSettingsBtn.textContent = '重置設置';
+resetSettingsBtn.style.backgroundColor = '#5C6B00';
+}, 2000);
+}
+});
+
+saveRow.appendChild(resetSettingsBtn);
 saveRow.appendChild(saveSettingsBtn);
 container.appendChild(saveRow);
 return container;
@@ -4237,7 +4317,7 @@ cbOpt_rewriteCb.addEventListener('click', function() { if (!cbOpt_officialCb.che
   allSaveBtn.addEventListener('click', function(e) {
     e.preventDefault();
     document.querySelectorAll('button').forEach(function(btn) {
-      if (btn.textContent === 'save' && btn.closest('tr') && btn.closest('tr').dataset.savedDataId) {
+      if (btn.textContent === 'save' && btn.closest('tr')) {
         btn.dispatchEvent(new MouseEvent('click', { bubbles: false, cancelable: true }));
       }
     });
@@ -4913,6 +4993,16 @@ _log('Kuroshiro:', typeof Kuroshiro);
 _log('KuromojiAnalyzer:', typeof KuromojiAnalyzer);
 
 initKuroshiro();
+
+setTimeout(function() {
+dbGet('dicts', 'jmdict_data').then(function(data) {
+if (!data || !Array.isArray(data) || data.length === 0) {
+_log('[Init] 檢測到外部字典缺失，開始自動下載...');
+var silentBtn = { disabled: false, textContent: '' };
+updateAllDicts(silentBtn);
+}
+}).catch(function() { _log('[Init] 外部字典檢查失敗'); });
+}, 2000);
 
 addButtonToPage();
 handleManageGalleryPage();
