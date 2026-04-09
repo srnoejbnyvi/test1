@@ -3356,11 +3356,39 @@ function getLocalDictionaryEntryOrderLoose(entry, fallbackIndex) {
     return fallbackIndex;
 }
 
+function getPrioritizedLocalDictionaryEntriesLoose() {
+    var merged = [];
+    var userDicts = getUserDictsRaw();
+
+    Object.keys(userDicts).sort(function(a, b) {
+        return a.localeCompare(b);
+    }).forEach(function(dictName) {
+        var dictObj = userDicts[dictName];
+        if (!dictObj || typeof dictObj !== 'object') return;
+
+        Object.keys(dictObj).forEach(function(sourceKey) {
+            var targetVal = dictObj[sourceKey];
+            var normalizedSource = normalizeLocalDictExactKey(sourceKey);
+            if (!normalizedSource || targetVal === undefined || targetVal === null || String(targetVal) === '') return;
+
+            merged.push({
+                source: sourceKey,
+                target: String(targetVal),
+                normalizedSource: normalizedSource,
+                dictName: dictName,
+                order: merged.length
+            });
+        });
+    });
+
+    return merged;
+}
+
 function findExactLocalDictionaryMatchLoose(text) {
     var normalizedText = normalizeLocalDictExactKey(text);
     if (!normalizedText) return null;
 
-    var entries = getLocalDictionaryEntriesLoose();
+    var entries = getPrioritizedLocalDictionaryEntriesLoose();
     if (!entries || !entries.length) return null;
 
     var prepared = [];
@@ -3426,7 +3454,7 @@ function normalizeLocalDictInlineMatchText(text) {
 }
 
 function getPreparedLocalDictionaryInlineEntriesLoose() {
-    var entries = getLocalDictionaryEntriesLoose();
+    var entries = getPrioritizedLocalDictionaryEntriesLoose();
     var prepared = [];
 
     for (var i = 0; i < entries.length; i++) {
@@ -3449,8 +3477,8 @@ function getPreparedLocalDictionaryInlineEntriesLoose() {
     }
 
     prepared.sort(function(a, b) {
-        if (a.source.length !== b.source.length) return b.source.length - a.source.length;
         if (a.order !== b.order) return a.order - b.order;
+        if (a.source.length !== b.source.length) return b.source.length - a.source.length;
         return 0;
     });
 
@@ -3784,12 +3812,42 @@ function convertToRomajiRewritten(text, romanBtn, outputField) {
 
     traceRomanization('convertToRomajiRewritten:input', { text: text });
 
-    preprocessText(text).then(function(preprocessed) {
+    var exactLocalDictionaryMatch = findExactLocalDictionaryMatchLoose(text);
+    if (exactLocalDictionaryMatch) {
+        var exactOutput = String(exactLocalDictionaryMatch.target || '');
+
+        traceRomanization('convertToRomajiRewritten:local_dictionary_exact_match', {
+            input: text,
+            preprocessed: text,
+            source: exactLocalDictionaryMatch.source,
+            normalizedSource: exactLocalDictionaryMatch.normalizedSource,
+            target: exactLocalDictionaryMatch.target,
+            order: exactLocalDictionaryMatch.order
+        });
+
+        outputField.value = exactOutput;
+        opLog('羅馬字轉換', { input: text, output: exactOutput, via: 'local_dictionary_exact_match' });
+
+        romanBtn.disabled = false;
+        romanBtn.textContent = 'Romanization';
+        romanBtn.style.backgroundColor = '#E0DED3';
+        romanBtn.style.color = '#5C0D12';
+        return;
+    }
+
+    var localDictionaryFirstPass = applyLocalDictionaryExactReplacementsLoose(text);
+
+    traceRomanization('convertToRomajiRewritten:local_dictionary_first_pass', {
+        input: text,
+        inlineReplaced: localDictionaryFirstPass
+    });
+
+    preprocessText(localDictionaryFirstPass).then(function(preprocessed) {
         traceRomanization('convertToRomajiRewritten:preprocessed', {
             preprocessed: preprocessed
         });
 
-        var exactLocalDictionaryMatch = findExactLocalDictionaryMatchLoose(preprocessed);
+        var exactLocalDictionaryMatch = null;
         if (exactLocalDictionaryMatch) {
             var exactOutput = String(exactLocalDictionaryMatch.target || '');
 
@@ -3812,7 +3870,7 @@ function convertToRomajiRewritten(text, romanBtn, outputField) {
             return null;
         }
 
-        var inlineReplaced = applyLocalDictionaryExactReplacementsLoose(preprocessed);
+        var inlineReplaced = preprocessed;
 
         traceRomanization('convertToRomajiRewritten:preprocessed_after_local_dictionary', {
             preprocessed: preprocessed,
@@ -6255,6 +6313,22 @@ function createDictManagerPanel() {
             return;
         }
 
+        var duplicateInfo = findLocalDictionaryDuplicateLoose(dictKey, keyText, null);
+        if (duplicateInfo) {
+            var dupeDelayMs = currentSettings.confirmBtnColorMs || 1000;
+            topSaveBtn.textContent = 'Dupe';
+            topSaveBtn.style.backgroundColor = '#CC0000';
+            topSaveBtn.style.color = '#FFFFFF';
+            topSaveBtn.style.borderColor = '#CC0000';
+            setTimeout(function() {
+                topSaveBtn.textContent = 'Save';
+                topSaveBtn.style.backgroundColor = '#E0DED3';
+                topSaveBtn.style.color = '#5C0D12';
+                topSaveBtn.style.borderColor = '#5C0D12';
+            }, dupeDelayMs);
+            return;
+        }
+
         var dicts = getUserDictsRaw();
         if (!dicts[dictKey] || typeof dicts[dictKey] !== 'object') dicts[dictKey] = {};
         var exists = Object.prototype.hasOwnProperty.call(dicts[dictKey], keyText);
@@ -6330,8 +6404,80 @@ function createDictManagerPanel() {
         return entries;
     }
 
-    function saveLocalDict(dictKey, rows) {
+    function findLocalDictionaryDuplicateLoose(dictKey, sourceText, originalKey) {
+        var normalizedSource = normalizeLocalDictExactKey(sourceText);
+        if (!normalizedSource) return null;
+
         var dicts = getUserDictsRaw();
+        var matched = null;
+
+        Object.keys(dicts).some(function(currentDictKey) {
+            var dictObj = dicts[currentDictKey];
+            if (!dictObj || typeof dictObj !== 'object') return false;
+
+            return Object.keys(dictObj).some(function(currentKey) {
+                if (currentDictKey === dictKey && originalKey && currentKey === originalKey) return false;
+                if (normalizeLocalDictExactKey(currentKey) !== normalizedSource) return false;
+                matched = { dictKey: currentDictKey, key: currentKey };
+                return true;
+            });
+        });
+
+        return matched;
+    }
+
+    function validateLocalDictionaryRowsAgainstDuplicatesLoose(dictKey, rows) {
+        var seen = {};
+        var i;
+        var finalKey;
+        var normalizedKey;
+        var duplicateInfo;
+
+        for (i = 0; i < rows.length; i++) {
+            finalKey = String((rows[i].editing && rows[i].checked ? rows[i].editKey : rows[i].key) || '').trim();
+            normalizedKey = normalizeLocalDictExactKey(finalKey);
+            if (!normalizedKey) continue;
+            if (seen[normalizedKey]) return { dictKey: dictKey, key: finalKey };
+            seen[normalizedKey] = true;
+        }
+
+        for (i = 0; i < rows.length; i++) {
+            finalKey = String((rows[i].editing && rows[i].checked ? rows[i].editKey : rows[i].key) || '').trim();
+            if (!finalKey) continue;
+            duplicateInfo = findLocalDictionaryDuplicateLoose(dictKey, finalKey, rows[i].key);
+            if (duplicateInfo) return duplicateInfo;
+        }
+
+        return null;
+    }
+
+    function rebuildLocalDictionaryFromRowsLoose(dictKey, rows) {
+        var dicts = getUserDictsRaw();
+        var rebuilt = {};
+
+        rows.forEach(function(row) {
+            var newKey = String((row.editing && row.checked ? row.editKey : row.key) || '').trim();
+            var newVal = String((row.editing && row.checked ? row.editVal : row.val) || '');
+            if (!newKey) return;
+
+            rebuilt[newKey] = newVal;
+            row.key = newKey;
+            row.val = newVal;
+            row.editKey = newKey;
+            row.editVal = newVal;
+            row.editing = false;
+            row.checked = false;
+        });
+
+        dicts[dictKey] = rebuilt;
+        setUserDictsRaw(dicts);
+        return rebuilt;
+    }
+
+    function saveLocalDict(dictKey, rows) {
+        rebuildLocalDictionaryFromRowsLoose(dictKey, rows);
+        localDictCache[dictKey] = null;
+        return;
         var current = dicts[dictKey] || {};
 
         rows.forEach(function(row) {
@@ -6454,6 +6600,13 @@ function createDictManagerPanel() {
         }
 
         function validateSaveRows() {
+            validateSaveRows.lastDuplicateInfo = null;
+            var duplicateInfo = validateLocalDictionaryRowsAgainstDuplicatesLoose(dictKey, rows);
+            if (duplicateInfo) {
+                validateSaveRows.lastDuplicateInfo = duplicateInfo;
+                return false;
+            }
+
             var newKeys = {};
             for (var i = 0; i < rows.length; i++) {
                 var row = rows[i];
@@ -6482,7 +6635,7 @@ function createDictManagerPanel() {
                     var cbEdit = document.createElement('input');
                     cbEdit.type = 'checkbox';
                     cbEdit.checked = !!row.checked;
-                    cbEdit.style.cssText = 'flex-shrink: 0; margin: 0 4px; accent-color: #5C0D12;';
+                    cbEdit.style.cssText = 'width: 18px; height: 22px; flex-shrink: 0; margin: 0 4px; padding: 0; accent-color: #5C0D12; vertical-align: middle;';
                     cbEdit.addEventListener('change', function() { row.checked = cbEdit.checked; });
 
                     var keyInput = document.createElement('input');
@@ -6513,26 +6666,75 @@ function createDictManagerPanel() {
                     rowDiv.appendChild(keyInput);
                     rowDiv.appendChild(valInput);
                     rowDiv.appendChild(cancelBtn);
+
+                    var editMoveUpBtn = document.createElement('button');
+                    editMoveUpBtn.textContent = '↑';
+                    applyPageToneBtnStyle(editMoveUpBtn, 'width: 22px;height: 22px;padding: 0;margin-right: 2px;flex-shrink: 0;');
+                    var editCurrentIndex = rows.indexOf(row);
+                    if (editCurrentIndex <= 0) {
+                        editMoveUpBtn.style.opacity = '0.3';
+                        editMoveUpBtn.style.cursor = 'default';
+                    }
+                    editMoveUpBtn.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        var idx = rows.indexOf(row);
+                        if (idx <= 0) return;
+                        var tmp = rows[idx - 1];
+                        rows[idx - 1] = rows[idx];
+                        rows[idx] = tmp;
+                        renderRows();
+                    });
+
+                    var editMoveDownBtn = document.createElement('button');
+                    editMoveDownBtn.textContent = '↓';
+                    applyPageToneBtnStyle(editMoveDownBtn, 'width: 22px;height: 22px;padding: 0;flex-shrink: 0;');
+                    if (editCurrentIndex >= rows.length - 1) {
+                        editMoveDownBtn.style.opacity = '0.3';
+                        editMoveDownBtn.style.cursor = 'default';
+                    }
+                    editMoveDownBtn.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        var idx = rows.indexOf(row);
+                        if (idx < 0 || idx >= rows.length - 1) return;
+                        var tmp = rows[idx + 1];
+                        rows[idx + 1] = rows[idx];
+                        rows[idx] = tmp;
+                        renderRows();
+                    });
+
+                    rowDiv.appendChild(editMoveUpBtn);
+                    rowDiv.appendChild(editMoveDownBtn);
                 } else {
                     var cb = document.createElement('input');
                     cb.type = 'checkbox';
                     cb.checked = !!row.checked;
-                    cb.style.cssText = 'flex-shrink: 0; margin: 0 4px; accent-color: #5C0D12;';
+                    cb.style.cssText = 'width: 18px; height: 22px; flex-shrink: 0; margin: 0 4px; padding: 0; accent-color: #5C0D12; vertical-align: middle;';
                     cb.addEventListener('change', function() { row.checked = cb.checked; });
 
                     var keySpan = document.createElement('span');
                     keySpan.textContent = row.key;
-                    keySpan.style.cssText = 'flex: 1; min-width: 0; font-size: 9pt; padding: 2px 4px; border-right: 1px solid rgba(92,13,18,0.15); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 18px;';
+                    keySpan.style.cssText = 'flex: 1; min-width: 0; font-size: 9pt; padding: 2px 4px; border-right: 1px solid rgba(92,13,18,0.15); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 18px; cursor: pointer;';
+                    keySpan.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        row.checked = !row.checked;
+                        renderRows();
+                    });
 
                     var valSpan = document.createElement('span');
                     valSpan.textContent = row.val;
-                    valSpan.style.cssText = 'flex: 1; min-width: 0; font-size: 9pt; padding: 2px 4px; border-right: 1px solid rgba(92,13,18,0.15); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 18px;';
+                    valSpan.style.cssText = 'flex: 1; min-width: 0; font-size: 9pt; padding: 2px 4px; border-right: 1px solid rgba(92,13,18,0.15); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 18px; cursor: pointer;';
+                    valSpan.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        row.checked = !row.checked;
+                        renderRows();
+                    });
 
                     var editBtn = document.createElement('button');
                     editBtn.textContent = '✎';
                     editBtn.style.cssText = 'width: 32px; flex-shrink: 0; border: none; background: #E0DED3; color: #5C0D12; font-weight: bold; font-size: 9pt; cursor: pointer; height: 22px; padding: 0;';
                     editBtn.addEventListener('click', function(e) {
                         e.preventDefault();
+                        row.checked = true;
                         row.editing = true;
                         row.editKey = row.key;
                         row.editVal = row.val;
@@ -6543,6 +6745,44 @@ function createDictManagerPanel() {
                     rowDiv.appendChild(keySpan);
                     rowDiv.appendChild(valSpan);
                     rowDiv.appendChild(editBtn);
+
+                    var viewMoveUpBtn = document.createElement('button');
+                    viewMoveUpBtn.textContent = '↑';
+                    applyPageToneBtnStyle(viewMoveUpBtn, 'width: 22px;height: 22px;padding: 0;margin-right: 2px;flex-shrink: 0;');
+                    var viewCurrentIndex = rows.indexOf(row);
+                    if (viewCurrentIndex <= 0) {
+                        viewMoveUpBtn.style.opacity = '0.3';
+                        viewMoveUpBtn.style.cursor = 'default';
+                    }
+                    viewMoveUpBtn.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        var idx = rows.indexOf(row);
+                        if (idx <= 0) return;
+                        var tmp = rows[idx - 1];
+                        rows[idx - 1] = rows[idx];
+                        rows[idx] = tmp;
+                        renderRows();
+                    });
+
+                    var viewMoveDownBtn = document.createElement('button');
+                    viewMoveDownBtn.textContent = '↓';
+                    applyPageToneBtnStyle(viewMoveDownBtn, 'width: 22px;height: 22px;padding: 0;flex-shrink: 0;');
+                    if (viewCurrentIndex >= rows.length - 1) {
+                        viewMoveDownBtn.style.opacity = '0.3';
+                        viewMoveDownBtn.style.cursor = 'default';
+                    }
+                    viewMoveDownBtn.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        var idx = rows.indexOf(row);
+                        if (idx < 0 || idx >= rows.length - 1) return;
+                        var tmp = rows[idx + 1];
+                        rows[idx + 1] = rows[idx];
+                        rows[idx] = tmp;
+                        renderRows();
+                    });
+
+                    rowDiv.appendChild(viewMoveUpBtn);
+                    rowDiv.appendChild(viewMoveDownBtn);
                 }
 
                 rightListDiv.appendChild(rowDiv);
@@ -6574,7 +6814,22 @@ function createDictManagerPanel() {
 
         saveBtn.addEventListener('click', function(e) {
             e.preventDefault();
-            if (!validateSaveRows()) return;
+            if (!validateSaveRows()) {
+                if (validateSaveRows.lastDuplicateInfo) {
+                    var dupeDelayMs = currentSettings.confirmBtnColorMs || 1000;
+                    saveBtn.textContent = 'Dupe';
+                    saveBtn.style.backgroundColor = '#CC0000';
+                    saveBtn.style.color = '#FFFFFF';
+                    saveBtn.style.borderColor = '#CC0000';
+                    setTimeout(function() {
+                        saveBtn.textContent = 'Save';
+                        saveBtn.style.backgroundColor = '#5C0D12';
+                        saveBtn.style.color = '#FFFFFF';
+                        saveBtn.style.borderColor = '#5C0D12';
+                    }, dupeDelayMs);
+                }
+                return;
+            }
 
             var changedItems = [];
             rows.forEach(function(row) {
