@@ -66,18 +66,28 @@ function _logToPanel(level, args) {
 function getDefaultSettings() {
     return {
         customRootFolder: '',
+        customAuthorizedFolders: [],
         retryCount: 3,
         translatedDefaultMTL: true,
         nonJapaneseDefaultTranslated: false,
         japaneseDefaultOfficialTextless: false,
+        japaneseDefaultAIGenerated: true,
         autoSwitchDictDropdown: true,
         logToBrowserConsole: false,
+        showDebugLogsInBrowserConsole: false,
         deleteDoubleConfirm: true,
         doubleConfirmMs: 1000,
         confirmBtnColorChange: true,
         confirmBtnColorMs: 1000,
+        confirmBtnSuccessColorChange: true,
+        confirmBtnErrorColorChange: true,
+        confirmBtnSuccessColor: '0,255,0',
+        confirmBtnErrorColor: '255,0,0',
+        doubleConfirmColor: '255,0,0',
         previewMaxWidth: 800,
         previewMaxHeight: 800,
+        galleryFolderManagerCopyWithExtension: true,
+        dictPriorityPadLength: 5,
         optionPriorities: {
             mtl: 1,
             digital: 2,
@@ -92,15 +102,69 @@ function getDefaultSettings() {
     };
 }
 
+function _generateAuthorizedFolderId() {
+    return 'authorized_root_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
+}
+
+function normalizeAuthorizedFolderSettingsList(list) {
+    var source = Array.isArray(list) ? list : [];
+    var out = [];
+    var seen = {};
+
+    source.forEach(function(item) {
+        if (!item) return;
+
+        var id = String(item.id || '').trim() || _generateAuthorizedFolderId();
+        while (seen[id]) id = _generateAuthorizedFolderId();
+        seen[id] = true;
+
+        var label = String(item.label || item.name || item.path || item.displayName || '').trim();
+        if (!label) label = '授權文件夾 ' + (out.length + 1);
+
+        out.push({
+            id: id,
+            label: label
+        });
+    });
+
+    return out;
+}
+
+function migrateAuthorizedFolderSettings(settings) {
+    var defaults = getDefaultSettings();
+    var merged = Object.assign({}, defaults, settings || {});
+    var folders = normalizeAuthorizedFolderSettingsList(merged.customAuthorizedFolders);
+    var legacyRootLabel = String(merged.customRootFolder || '').trim();
+
+    if (!folders.length && legacyRootLabel) {
+        folders.push({
+            id: _generateAuthorizedFolderId(),
+            label: legacyRootLabel
+        });
+    }
+
+    if (!folders.length) {
+        merged.customRootFolder = '';
+    } else if (folders.length === 1) {
+        merged.customRootFolder = folders[0].label;
+    } else if (!folders.some(function(item) { return item.label === legacyRootLabel; })) {
+        merged.customRootFolder = '';
+    }
+
+    merged.customAuthorizedFolders = folders;
+    delete merged.defaultAuthorizedFolderId;
+    return merged;
+}
+
 function loadSettings() {
     try {
         var saved = GM_getValue('fifybuj_settings', null);
         if (saved) {
             var defaults = getDefaultSettings();
-            return Object.assign({}, defaults, saved);
+            return migrateAuthorizedFolderSettings(Object.assign({}, defaults, saved));
         }
     } catch (e) {}
-    return getDefaultSettings();
+    return migrateAuthorizedFolderSettings(getDefaultSettings());
 }
 
 var currentSettings = loadSettings();
@@ -118,7 +182,79 @@ function shouldConsoleLog() {
     return !!(settings && settings.logToBrowserConsole);
 }
 
+function _getDebugLogFilterSettingsSafe() {
+    try {
+        return getCurrentSettingsSafe() || {};
+    } catch (e) {
+        return {};
+    }
+}
+function _normalizeDebugLogLevel(level) {
+    return String(level == null ? '' : level).trim().toUpperCase();
+}
+function _flattenDebugLogArgs(args) {
+    var list = Array.isArray(args) ? args : [args];
+    return list.map(function(item) {
+        if (item == null) return '';
+        if (typeof item === 'string') return item;
+        if (typeof item === 'number' || typeof item === 'boolean') return String(item);
+        if (item instanceof Error) return item.stack || item.message || String(item);
+        try {
+            if (item && typeof item.message === 'string') {
+                return item.message + ' ' + JSON.stringify(item);
+            }
+        } catch (e) {}
+        try {
+            return JSON.stringify(item);
+        } catch (e2) {}
+        try {
+            return String(item);
+        } catch (e3) {}
+        return '';
+    }).join(' ');
+}
+function _isBrowserConsoleOutputEnabledBySettings() {
+    return !!_getDebugLogFilterSettingsSafe().logToBrowserConsole;
+}
+function _isDebugLogOutputEnabledBySettings() {
+    return !!_getDebugLogFilterSettingsSafe().showDebugLogsInBrowserConsole;
+}
+function _isDebugTaggedLogMessage(level, args) {
+    if (_normalizeDebugLogLevel(level) === 'DEBUG') return true;
+    return /\[\s*debug\s*\]/i.test(_flattenDebugLogArgs(args));
+}
+function _shouldAllowDebugTaggedMessage(level, args) {
+    if (!_isDebugTaggedLogMessage(level, args)) return true;
+    return _isDebugLogOutputEnabledBySettings();
+}
+function _shouldEmitBrowserConsoleMessage(level, args) {
+    if (!_isBrowserConsoleOutputEnabledBySettings()) return false;
+    if (!_shouldAllowDebugTaggedMessage(level, args)) return false;
+    return true;
+}
 function _emitBrowserConsole(level, args) {
+    var settings = getCurrentSettingsSafe();
+    var upperLevel = String(level || '').toUpperCase();
+    if (upperLevel === 'DEBUG') {
+        if (!settings.showDebugLogsInBrowserConsole) return;
+    } else {
+        if (!settings.logToBrowserConsole) return;
+    }
+    var oldGetCurrentSettingsSafe = getCurrentSettingsSafe;
+    try {
+        getCurrentSettingsSafe = function() {
+            var current = oldGetCurrentSettingsSafe();
+            if (upperLevel === 'DEBUG') {
+                return Object.assign({}, current, { logToBrowserConsole: true });
+            }
+            return current;
+        };
+        return _emitBrowserConsole__legacy(level, args);
+    } finally {
+        getCurrentSettingsSafe = oldGetCurrentSettingsSafe;
+    }
+}
+function _emitBrowserConsole__legacy(level, args) {
     if (!shouldConsoleLog()) return;
     var method = console.log;
     if (level === 'ERROR' && console.error) method = console.error;
@@ -128,8 +264,14 @@ function _emitBrowserConsole(level, args) {
     method.apply(console, Array.prototype.slice.call(args || []));
 }
 
+function _shouldOutputToLogPanel(level, args) {
+    return _shouldAllowDebugTaggedMessage(level, args);
+}
+
 function _emitControlledLog(level, args) {
     _emitBrowserConsole(level, args);
+    if (!_shouldOutputToLogPanel(level, args)) return;
+    if (!_shouldOutputToLogPanel(level, args)) return;
     _logToPanel(level, args);
 }
 
@@ -236,22 +378,301 @@ function applyTopBarControlStyle(el, width, extraCss) {
     return el;
 }
 
+function _normalizeConfirmFeedbackColorCode(value, fallback) {
+    var text = String(value == null ? '' : value).trim();
+    var m = text.match(/^(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})$/);
+    if (!m) return fallback;
+
+    var r = parseInt(m[1], 10);
+    var g = parseInt(m[2], 10);
+    var b = parseInt(m[3], 10);
+
+    if (isNaN(r) || isNaN(g) || isNaN(b)) return fallback;
+    if (r < 0 || r > 255 || g < 0 || g > 255 || b < 0 || b > 255) return fallback;
+
+    return r + ',' + g + ',' + b;
+}
+
+function _getConfirmFeedbackSettingsSafe() {
+    var settings = Object.assign({}, getDefaultSettings(), getCurrentSettingsSafe() || {});
+    var delayMs = parseInt(settings.confirmBtnColorMs, 10);
+    if (!isFinite(delayMs) || delayMs < 0) delayMs = 1000;
+
+    var globalEnabled = settings.confirmBtnColorChange !== false;
+    var successEnabled = globalEnabled && settings.confirmBtnSuccessColorChange !== false;
+    var errorEnabled = globalEnabled && settings.confirmBtnErrorColorChange !== false;
+
+    var successRgb = _normalizeConfirmFeedbackColorCode(settings.confirmBtnSuccessColor, '0,255,0');
+    var errorRgb = _normalizeConfirmFeedbackColorCode(settings.confirmBtnErrorColor, '255,0,0');
+
+    function toCss(rgbText) {
+        var parts = String(rgbText || '').split(',');
+        var r = parseInt(parts[0], 10) || 0;
+        var g = parseInt(parts[1], 10) || 0;
+        var b = parseInt(parts[2], 10) || 0;
+        return 'rgb(' + r + ',' + g + ',' + b + ')';
+    }
+
+    return {
+        enabled: globalEnabled,
+        successEnabled: successEnabled,
+        errorEnabled: errorEnabled,
+        delayMs: delayMs,
+        successColor: toCss(successRgb),
+        errorColor: toCss(errorRgb)
+    };
+}
+
+function _getFeedbackElementText(el) {
+    if (!el) return '';
+    if (String(el.tagName || '').toUpperCase() === 'INPUT') return el.value;
+    return el.textContent;
+}
+
+function _setFeedbackElementText(el, text) {
+    if (!el || text === undefined) return;
+    if (String(el.tagName || '').toUpperCase() === 'INPUT') el.value = text;
+    else el.textContent = text;
+}
+
+function _captureFeedbackElementState(el) {
+    var computed = null;
+    try { computed = getComputedStyle(el); } catch (e) {}
+
+    return {
+        text: _getFeedbackElementText(el),
+        background: el.style.background,
+        backgroundColor: el.style.backgroundColor,
+        color: el.style.color,
+        border: el.style.border,
+        borderColor: el.style.borderColor,
+        borderStyle: el.style.borderStyle,
+        borderWidth: el.style.borderWidth,
+        outline: el.style.outline,
+        outlineColor: el.style.outlineColor,
+        outlineStyle: el.style.outlineStyle,
+        outlineWidth: el.style.outlineWidth,
+        computedBackgroundColor: computed ? computed.backgroundColor : '',
+        computedColor: computed ? computed.color : '',
+        computedBorderColor: computed ? computed.borderColor : '',
+        computedBorderStyle: computed ? computed.borderStyle : '',
+        computedBorderWidth: computed ? computed.borderWidth : '',
+        computedOutlineColor: computed ? computed.outlineColor : '',
+        computedOutlineStyle: computed ? computed.outlineStyle : '',
+        computedOutlineWidth: computed ? computed.outlineWidth : ''
+    };
+}
+
+function _restoreFeedbackElementState(el, state) {
+    if (!el || !state) return;
+    _setFeedbackElementText(el, state.text);
+
+    var fallbackBg = '';
+    try {
+        fallbackBg = getComputedStyle(document.body).backgroundColor || getComputedStyle(document.documentElement).backgroundColor || '';
+    } catch (e) {}
+    if (!fallbackBg || fallbackBg === 'rgba(0, 0, 0, 0)' || fallbackBg === 'transparent') fallbackBg = '#E0DED3';
+
+    var fallbackFg = '';
+    try {
+        fallbackFg = getComputedStyle(document.querySelector('.s .h .l') || document.body).color || '';
+    } catch (e2) {}
+    if (!fallbackFg || fallbackFg === 'rgba(0, 0, 0, 0)' || fallbackFg === 'transparent') fallbackFg = '#5C0D12';
+
+    el.style.removeProperty('background');
+    el.style.removeProperty('background-color');
+    el.style.removeProperty('color');
+    el.style.removeProperty('border');
+    el.style.removeProperty('border-color');
+    el.style.removeProperty('border-style');
+    el.style.removeProperty('border-width');
+    el.style.removeProperty('outline');
+    el.style.removeProperty('outline-color');
+    el.style.removeProperty('outline-style');
+    el.style.removeProperty('outline-width');
+
+    el.style.background = state.background || '';
+    el.style.backgroundColor = state.backgroundColor || '';
+    if (!state.background && !state.backgroundColor) {
+        var computedBg = state.computedBackgroundColor || '';
+        var computedBgUsable = !!(computedBg && computedBg !== 'rgba(0, 0, 0, 0)' && computedBg !== 'transparent');
+        el.style.backgroundColor = computedBgUsable ? computedBg : fallbackBg;
+    }
+
+    el.style.color = state.color || '';
+    if (!state.color) {
+        el.style.color = state.computedColor || fallbackFg;
+    }
+
+    el.style.border = state.border || '';
+    el.style.borderColor = state.borderColor || '';
+    el.style.borderStyle = state.borderStyle || '';
+    el.style.borderWidth = state.borderWidth || '';
+
+    if (!state.border && !state.borderColor) {
+        el.style.borderColor = state.computedBorderColor || fallbackFg;
+    }
+    if (!state.border && !state.borderStyle) {
+        el.style.borderStyle = (state.computedBorderStyle && state.computedBorderStyle !== 'none') ? state.computedBorderStyle : 'solid';
+    }
+    if (!state.border && !state.borderWidth) {
+        el.style.borderWidth = (state.computedBorderWidth && state.computedBorderWidth !== '0px') ? state.computedBorderWidth : '1px';
+    }
+
+    el.style.outline = state.outline || '';
+    el.style.outlineColor = state.outlineColor || '';
+    el.style.outlineStyle = state.outlineStyle || '';
+    el.style.outlineWidth = state.outlineWidth || '';
+}
+
+function _applyFeedbackElementState(el, state, options) {
+    if (!el) return;
+    options = options || {};
+    if (options.text !== undefined) _setFeedbackElementText(el, options.text);
+
+    var feedbackSettings = _getConfirmFeedbackSettingsSafe();
+    if (options.useColor === false || !feedbackSettings.enabled) return;
+
+    if (options.colorType === 'success' && !feedbackSettings.successEnabled) return;
+    if (options.colorType === 'error' && !feedbackSettings.errorEnabled) return;
+
+    var backgroundColor = options.backgroundColor || '';
+    if (!backgroundColor) {
+        if (options.colorType === 'success') backgroundColor = feedbackSettings.successColor;
+        else if (options.colorType === 'error') backgroundColor = feedbackSettings.errorColor;
+    }
+    if (!backgroundColor) return;
+
+    var borderColor = '';
+    try {
+        borderColor = getComputedStyle(document.querySelector('.s .h .l') || document.body).color || '';
+    } catch (e) {}
+    if (!borderColor || borderColor === 'rgba(0, 0, 0, 0)' || borderColor === 'transparent') borderColor = '#5C0D12';
+
+    var borderWidth = (state && state.computedBorderWidth && state.computedBorderWidth !== '0px')
+        ? state.computedBorderWidth
+        : '1px';
+
+    el.style.setProperty('background', backgroundColor, 'important');
+    el.style.setProperty('background-color', backgroundColor, 'important');
+    el.style.setProperty('color', '#FFFFFF', 'important');
+    el.style.setProperty('border-style', 'solid', 'important');
+    el.style.setProperty('border-width', borderWidth, 'important');
+    el.style.setProperty('border-color', borderColor, 'important');
+}
+
+function _beginFeedbackState(el, options) {
+    if (!el) return null;
+    if (el.__feedbackController && typeof el.__feedbackController.restore === 'function') {
+        el.__feedbackController.restore();
+    }
+
+    var state = _captureFeedbackElementState(el);
+    if (options && options.restoreText !== undefined) {
+        state.text = options.restoreText;
+    }
+
+    _applyFeedbackElementState(el, state, options);
+
+    var restored = false;
+    var controller = {
+        restore: function() {
+            if (restored) return;
+            restored = true;
+            if (controller.timer) {
+                clearTimeout(controller.timer);
+                controller.timer = null;
+            }
+            _restoreFeedbackElementState(el, state);
+            if (el.__feedbackController === controller) el.__feedbackController = null;
+        },
+        timer: null
+    };
+
+    el.__feedbackController = controller;
+
+    if (options && typeof options.durationMs === 'number' && options.durationMs >= 0) {
+        controller.timer = setTimeout(function() {
+            controller.restore();
+        }, options.durationMs);
+    }
+
+    return controller;
+}
+
+function _flashFeedbackState(el, options) {
+    options = options || {};
+    if (typeof options.durationMs !== 'number' || options.durationMs < 0) {
+        options.durationMs = _getConfirmFeedbackSettingsSafe().delayMs;
+    }
+    return _beginFeedbackState(el, options);
+}
+
+function flashColoredSuccessState(el, text, restoreText, delayMs) {
+    return _flashFeedbackState(el, {
+        text: text,
+        restoreText: restoreText,
+        durationMs: delayMs,
+        useColor: true,
+        colorType: 'success'
+    });
+}
+
+function flashColoredErrorState(el, text, restoreText, delayMs) {
+    return _flashFeedbackState(el, {
+        text: text,
+        restoreText: restoreText,
+        durationMs: delayMs,
+        useColor: true,
+        colorType: 'error'
+    });
+}
+
+function flashCustomColoredState(el, text, restoreText, delayMs, backgroundColor) {
+    return _flashFeedbackState(el, {
+        text: text,
+        restoreText: restoreText,
+        durationMs: delayMs,
+        useColor: true,
+        backgroundColor: backgroundColor
+    });
+}
+
 function flashButtonSavedState(btn, doneText, revertText, delayMs) {
     if (!btn) return;
-    var originalText = revertText || btn.textContent;
-    btn.textContent = doneText || '已保存 ✓';
-    setTimeout(function() {
-        btn.textContent = originalText;
-    }, delayMs || 1500);
+
+    var restoreText = revertText !== undefined ? revertText : _getFeedbackElementText(btn);
+    var text = doneText || '已保存 ✓';
+    var durationMs = delayMs || 1500;
+
+    if (restoreText === 'Save' || restoreText === 'All Save') {
+        text = '✓';
+        durationMs = 1000;
+    }
+
+    return _flashFeedbackState(btn, {
+        text: text,
+        restoreText: restoreText,
+        durationMs: durationMs,
+        useColor: false
+    });
 }
 
 function flashButtonErrorState(btn, errText, revertText, delayMs) {
     if (!btn) return;
-    var originalText = revertText || btn.textContent;
-    btn.textContent = errText || '失敗';
-    setTimeout(function() {
-        btn.textContent = originalText;
-    }, delayMs || 1500);
+
+    var restoreText = revertText !== undefined ? revertText : _getFeedbackElementText(btn);
+
+    if (restoreText === 'All Save') {
+        return flashColoredErrorState(btn, 'Fail', 'All Save', delayMs || _getConfirmFeedbackSettingsSafe().delayMs);
+    }
+
+    return _flashFeedbackState(btn, {
+        text: errText || '失敗',
+        restoreText: restoreText,
+        durationMs: delayMs || 1500,
+        useColor: false
+    });
 }
 
 function refreshDictManagerPanels() {
@@ -261,6 +682,11 @@ function refreshDictManagerPanels() {
 
 function refreshShowFileListPanelIfOpen() {
     var panel = document.querySelector('.show-file-list-container');
+    if (panel && typeof panel.refreshPanel === 'function') panel.refreshPanel();
+}
+
+function refreshOpenDictManagerPanelIfOpen() {
+    var panel = document.querySelector('.dict-manager-container');
     if (panel && typeof panel.refreshPanel === 'function') panel.refreshPanel();
 }
 
@@ -303,23 +729,174 @@ function saveFileListsSafe(fileLists) {
     GM_setValue('file_lists', fileLists || {});
 }
 
+function getGalleryFileLeafNameFromPath(path) {
+    path = String(path || '');
+    if (!path) return '';
+    var parts = path.split('/');
+    return parts.length ? String(parts[parts.length - 1] || '') : '';
+}
+
+function normalizeGalleryFileListEntry(fileEntry) {
+    fileEntry = fileEntry || {};
+
+    var originalPath = String(fileEntry.originalPath || fileEntry.path || '');
+    var originalName = String(fileEntry.originalName || fileEntry.name || getGalleryFileLeafNameFromPath(originalPath) || '');
+    var uploadName = String(fileEntry.uploadName || fileEntry.currentName || fileEntry.renamedName || fileEntry.displayName || originalName || '');
+
+    if (!originalPath && originalName) originalPath = originalName;
+    if (!originalName && originalPath) originalName = getGalleryFileLeafNameFromPath(originalPath);
+    if (!uploadName) uploadName = originalName;
+
+    return {
+        name: originalName,
+        path: originalPath,
+        originalName: originalName,
+        originalPath: originalPath,
+        uploadName: uploadName
+    };
+}
+
+function normalizeGalleryFileListEntries(files) {
+    return Array.isArray(files) ? files.map(normalizeGalleryFileListEntry) : [];
+}
+
+function getGalleryFileUploadName(fileEntry) {
+    return normalizeGalleryFileListEntry(fileEntry).uploadName;
+}
+
+function normalizeGalleryRootSources(rootSources, sourceType, sourceLabel) {
+    var seen = {};
+    var normalized = [];
+
+    function pushSource(name, type) {
+        name = String(name || '').trim();
+        if (!name) return;
+        type = type === 'folder' ? 'folder' : 'archive';
+        var key = type + '::' + name;
+        if (seen[key]) return;
+        seen[key] = true;
+        normalized.push({ name: name, type: type });
+    }
+
+    if (Array.isArray(rootSources)) {
+        rootSources.forEach(function(item) {
+            if (!item) return;
+            if (typeof item === 'string') pushSource(item, sourceType);
+            else pushSource(item.name, item.type || sourceType);
+        });
+    }
+
+    if (!normalized.length && sourceLabel) {
+        pushSource(sourceLabel, sourceType);
+    }
+
+    return normalized;
+}
+
+function getArchiveSourceLabelFromResult(result) {
+    var label = String((result && (result.sourceLabel || result.title)) || '').trim();
+    if (!label) return 'archive.zip';
+    return /\.zip$/i.test(label) ? label : (label + '.zip');
+}
+
+function createGallerySourcePrefixedFileEntries(files, rootName) {
+    rootName = String(rootName || '').trim();
+    return normalizeGalleryFileListEntries(files).map(function(fileEntry) {
+        var normalized = normalizeGalleryFileListEntry(fileEntry);
+        var originalPath = String(normalized.originalPath || '').trim();
+        var displayPath = String(normalized.path || '').trim();
+        var basePath = originalPath || displayPath || String(normalized.originalName || '').trim();
+
+        if (!basePath) return normalized;
+
+        if (!originalPath) normalized.originalPath = basePath;
+        normalized.path = rootName ? (rootName + '/' + basePath) : basePath;
+        return normalized;
+    });
+}
+
+function createRenamedUploadFile(fileObj, uploadName) {
+    if (!fileObj) return fileObj;
+
+    uploadName = String(uploadName || '').trim();
+    if (!uploadName || uploadName === fileObj.name) return fileObj;
+
+    try {
+        return new File([fileObj], uploadName, {
+            type: fileObj.type,
+            lastModified: fileObj.lastModified
+        });
+    } catch (e) {
+        try {
+            return new File([fileObj], uploadName, {
+                type: fileObj.type
+            });
+        } catch (e2) {
+            return fileObj;
+        }
+    }
+}
+
 function readGalleryFileListById(galleryId) {
     var fileLists = getFileListsSafe();
     var data = fileLists[galleryId];
     if (Array.isArray(data)) {
-        return { folderName: null, files: data.slice() };
+        return {
+            folderName: null,
+            sourceType: null,
+            sourceLabel: null,
+            rootSources: [],
+            authorizedRootId: null,
+            files: normalizeGalleryFileListEntries(data.slice())
+        };
     }
     if (data && data.files && Array.isArray(data.files)) {
-        return { folderName: data.folderName || null, files: data.files.slice() };
+        var rootSources = normalizeGalleryRootSources(
+            data.rootSources,
+            data.sourceType || (data.folderName ? 'folder' : null),
+            data.sourceLabel || data.folderName || null
+        );
+        return {
+            folderName: data.folderName || null,
+            sourceType: rootSources[0] ? rootSources[0].type : (data.sourceType || null),
+            sourceLabel: rootSources[0] ? rootSources[0].name : (data.sourceLabel || null),
+            rootSources: rootSources,
+            authorizedRootId: data.authorizedRootId || null,
+            files: normalizeGalleryFileListEntries(data.files.slice())
+        };
     }
-    return { folderName: null, files: [] };
+    return {
+        folderName: null,
+        sourceType: null,
+        sourceLabel: null,
+        rootSources: [],
+        authorizedRootId: null,
+        files: []
+    };
 }
 
-function writeGalleryFileListById(galleryId, folderName, files) {
+function writeGalleryFileListById(galleryId, folderName, files, sourceType, sourceLabel, rootSources, authorizedRootId) {
     var fileLists = getFileListsSafe();
+    var existing = fileLists[galleryId] || {};
+    var normalizedRootSources = normalizeGalleryRootSources(
+        rootSources != null ? rootSources : existing.rootSources,
+        sourceType != null ? sourceType : existing.sourceType,
+        sourceLabel != null ? sourceLabel : existing.sourceLabel
+    );
+
+    if (!normalizedRootSources.length && (folderName || existing.folderName)) {
+        normalizedRootSources = normalizeGalleryRootSources(null, 'folder', folderName || existing.folderName);
+    }
+
+    var primarySource = normalizedRootSources[0] || null;
+
     fileLists[galleryId] = {
-        folderName: folderName || null,
-        files: Array.isArray(files) ? files : []
+        folderName: folderName || existing.folderName || null,
+        sourceType: primarySource ? primarySource.type : (sourceType != null ? sourceType : (existing.sourceType || null)),
+        sourceLabel: primarySource ? primarySource.name : (sourceLabel != null ? sourceLabel : (existing.sourceLabel || null)),
+        rootSources: normalizedRootSources,
+        authorizedRootId: authorizedRootId != null ? authorizedRootId : (existing.authorizedRootId || null),
+        files: normalizeGalleryFileListEntries(files)
     };
     saveFileListsSafe(fileLists);
 }
@@ -643,6 +1220,570 @@ function dbDelete(storeName, key) {
             var req = store.delete(key);
             req.onsuccess = function() { resolve(); };
             req.onerror = function(e) { reject(e.target.error); };
+        });
+    });
+}
+
+function normalizeAuthorizedRootHandleEntries(entries) {
+    var source = Array.isArray(entries) ? entries : [];
+    var out = [];
+    var seen = {};
+
+    source.forEach(function(item) {
+        if (!item) return;
+
+        var id = String(item.id || '').trim();
+        if (!id || seen[id]) return;
+        seen[id] = true;
+
+        var label = String(item.label || '').trim();
+        if (!label) label = '授權文件夾 ' + (out.length + 1);
+
+        out.push({
+            id: id,
+            label: label,
+            handle: item.handle || null
+        });
+    });
+
+    return out;
+}
+
+function getAuthorizedRootHandleEntriesRaw() {
+    return dbGet('handles', 'authorized_root_handles').then(function(entries) {
+        return normalizeAuthorizedRootHandleEntries(entries);
+    }).catch(function() {
+        return [];
+    });
+}
+
+function setAuthorizedRootHandleEntriesRaw(entries) {
+    return dbSet('handles', 'authorized_root_handles', normalizeAuthorizedRootHandleEntries(entries));
+}
+
+function getAuthorizedRootEntriesDetailed() {
+    var settings = migrateAuthorizedFolderSettings(getCurrentSettingsSafe());
+
+    return getAuthorizedRootHandleEntriesRaw().then(function(handleEntries) {
+        var handleMap = {};
+        handleEntries.forEach(function(item) {
+            handleMap[item.id] = item;
+        });
+
+        var mergedEntries = settings.customAuthorizedFolders.map(function(folder) {
+            var matched = handleMap[folder.id] || null;
+            return {
+                id: folder.id,
+                label: folder.label,
+                handle: matched ? matched.handle : null
+            };
+        });
+
+        handleEntries.forEach(function(item) {
+            var exists = mergedEntries.some(function(entry) {
+                return entry.id === item.id;
+            });
+            if (!exists) {
+                mergedEntries.push({
+                    id: item.id,
+                    label: item.label,
+                    handle: item.handle || null
+                });
+            }
+        });
+
+        return Promise.all(mergedEntries.map(function(entry) {
+            if (!entry.handle || !entry.handle.queryPermission) {
+                return Object.assign({}, entry, {
+                    status: 'missing',
+                    statusText: '未授權'
+                });
+            }
+
+            return Promise.resolve().then(function() {
+                return entry.handle.queryPermission({ mode: 'read' });
+            }).then(function(permission) {
+                return Object.assign({}, entry, {
+                    status: permission === 'granted' ? 'granted' : 'prompt',
+                    statusText: permission === 'granted' ? '✓ 已授權' : '未授權'
+                });
+            }).catch(function(err) {
+                return Object.assign({}, entry, {
+                    status: 'error',
+                    statusText: '已失效',
+                    error: err && (err.message || String(err))
+                });
+            });
+        }));
+    });
+}
+
+function persistAuthorizedRootEntries(entries, baseSettings) {
+    var sourceEntries = Array.isArray(entries) ? entries : [];
+    var normalizedMeta = normalizeAuthorizedFolderSettingsList(sourceEntries.map(function(item) {
+        return {
+            id: item && item.id,
+            label: item && item.label
+        };
+    }));
+
+    var handleMap = {};
+    sourceEntries.forEach(function(item) {
+        if (!item) return;
+        var id = String(item.id || '').trim();
+        if (!id || !item.handle) return;
+        handleMap[id] = item.handle;
+    });
+
+    var normalizedHandleEntries = normalizedMeta.map(function(item) {
+        return {
+            id: item.id,
+            label: item.label,
+            handle: handleMap[item.id] || null
+        };
+    }).filter(function(item) {
+        return !!item.handle;
+    });
+
+    var nextSettings = migrateAuthorizedFolderSettings(Object.assign(
+        {},
+        getCurrentSettingsSafe(),
+        baseSettings || {},
+        {
+            customAuthorizedFolders: normalizedMeta
+        }
+    ));
+
+    saveSettings(nextSettings);
+
+    return setAuthorizedRootHandleEntriesRaw(normalizedHandleEntries).then(function() {
+        return nextSettings;
+    });
+}
+
+function migrateLegacyAuthorizedRootFolderState() {
+    return Promise.all([
+        dbGet('handles', 'root_folder_handle').catch(function() { return null; }),
+        getAuthorizedRootHandleEntriesRaw().catch(function() { return []; })
+    ]).then(function(results) {
+        var legacyHandle = results[0];
+        var handleEntries = normalizeAuthorizedRootHandleEntries(results[1]);
+        var settingsToPersist = migrateAuthorizedFolderSettings(getCurrentSettingsSafe());
+        var changedSettings = false;
+        var changedHandles = false;
+
+        if (!settingsToPersist.customAuthorizedFolders.length && legacyHandle) {
+            settingsToPersist = migrateAuthorizedFolderSettings(Object.assign({}, settingsToPersist, {
+                customAuthorizedFolders: [
+                    {
+                        id: _generateAuthorizedFolderId(),
+                        label: legacyHandle.name || '授權文件夾 1'
+                    }
+                ]
+            }));
+            changedSettings = true;
+        }
+
+        if (legacyHandle && settingsToPersist.customAuthorizedFolders.length) {
+            var firstFolder = settingsToPersist.customAuthorizedFolders[0];
+            var alreadyMapped = handleEntries.some(function(item) {
+                return item.id === firstFolder.id;
+            });
+
+            if (!alreadyMapped) {
+                handleEntries.push({
+                    id: firstFolder.id,
+                    label: firstFolder.label,
+                    handle: legacyHandle
+                });
+                changedHandles = true;
+            }
+        }
+
+        handleEntries = normalizeAuthorizedRootHandleEntries(handleEntries.map(function(item) {
+            var matchedMeta = settingsToPersist.customAuthorizedFolders.find(function(folder) {
+                return folder.id === item.id;
+            });
+            if (matchedMeta && item.label !== matchedMeta.label) {
+                changedHandles = true;
+                return {
+                    id: item.id,
+                    label: matchedMeta.label,
+                    handle: item.handle
+                };
+            }
+            return item;
+        }));
+
+        if (changedSettings) saveSettings(settingsToPersist);
+        if (!changedHandles) return null;
+        return setAuthorizedRootHandleEntriesRaw(handleEntries);
+    });
+}
+
+function createAuthorizedSelectionError(code, message) {
+    var err = new Error(message || code || 'AUTHORIZED_SELECTION_ERROR');
+    err.code = code || 'AUTHORIZED_SELECTION_ERROR';
+    return err;
+}
+
+function getAuthorizedSelectionErrorMessage(code, targetLabel) {
+    targetLabel = String(targetLabel || '項目');
+
+    if (code === 'NO_AUTHORIZED_ROOTS') return '尚未設定授權文件夾';
+    if (code === 'AUTHORIZED_ROOT_PERMISSION_DENIED') return '授權文件夾讀取權限失效';
+    if (code === 'PICKER_UNSUPPORTED') return '目前瀏覽器不支援檔案選擇器';
+    if (code === 'PICKER_INVOCATION_FAILED') return '檔案選擇器呼叫失敗';
+    if (code === 'EMPTY_SELECTION') return '未選擇任何' + targetLabel;
+    if (code === 'NOT_IN_AUTHORIZED_FOLDER') return targetLabel + '不在已授權文件夾內';
+
+    return targetLabel + '授權檢查失敗';
+}
+
+function getAuthorizedSelectionFailureDisplayMessage(err, targetLabel) {
+    var code = err && err.code;
+    targetLabel = String(targetLabel || '項目');
+
+    if (code === 'NO_AUTHORIZED_ROOTS') return '導入失敗：尚未設定授權文件夾';
+    if (code === 'AUTHORIZED_ROOT_PERMISSION_DENIED') return '導入失敗：授權文件夾權限失效';
+    if (code === 'PICKER_UNSUPPORTED') return '導入失敗：瀏覽器不支援檔案選擇器';
+    if (code === 'PICKER_INVOCATION_FAILED') return '導入失敗：檔案選擇器呼叫失敗';
+    if (code === 'NOT_IN_AUTHORIZED_FOLDER') return '導入失敗：不在已授權文件夾內';
+    if (code === 'EMPTY_SELECTION' || (err && err.name === 'AbortError')) return '已取消選擇' + targetLabel;
+
+    return '導入失敗：授權檢查失敗';
+}
+
+function findDescendantHandlePathByScan(directoryHandle, targetHandle, prefixParts) {
+    prefixParts = Array.isArray(prefixParts) ? prefixParts.slice() : [];
+    if (!directoryHandle || !targetHandle || !directoryHandle.values) return Promise.resolve(null);
+
+    var iterator = null;
+    try {
+        iterator = directoryHandle.values();
+    } catch (e) {
+        return Promise.resolve(null);
+    }
+
+    function processNext() {
+        return iterator.next().then(function(result) {
+            if (result.done) return null;
+
+            var entry = result.value;
+            if (!entry) return processNext();
+
+            if (entry.kind === 'file') {
+                if (!entry.isSameEntry) return processNext();
+                return Promise.resolve(entry.isSameEntry(targetHandle)).catch(function() {
+                    return false;
+                }).then(function(isSame) {
+                    if (isSame) return prefixParts.concat([entry.name]);
+                    return processNext();
+                });
+            }
+
+            if (entry.kind === 'directory') {
+                return Promise.resolve(entry.isSameEntry ? entry.isSameEntry(targetHandle) : false).catch(function() {
+                    return false;
+                }).then(function(isSameDirectory) {
+                    if (isSameDirectory) return prefixParts.concat([entry.name]);
+                    return findDescendantHandlePathByScan(entry, targetHandle, prefixParts.concat([entry.name]));
+                }).then(function(found) {
+                    if (found) return found;
+                    return processNext();
+                });
+            }
+
+            return processNext();
+        }).catch(function() {
+            return null;
+        });
+    }
+
+    return processNext();
+}
+
+function requestReadPermissionIfNeeded(handle) {
+    if (!handle) return Promise.resolve(false);
+
+    return Promise.resolve().then(function() {
+        if (!handle.queryPermission) return true;
+        return handle.queryPermission({ mode: 'read' });
+    }).then(function(permission) {
+        if (permission === true || permission === 'granted') return true;
+        if (!handle.requestPermission) return false;
+        return handle.requestPermission({ mode: 'read' }).then(function(nextPermission) {
+            return nextPermission === true || nextPermission === 'granted';
+        }).catch(function() {
+            return false;
+        });
+    }).catch(function() {
+        return false;
+    });
+}
+
+function buildAuthorizedRelativePathFromParts(parts) {
+    return Array.isArray(parts) && parts.length ? parts.join('/') : '';
+}
+
+function resolveHandleAgainstDirectoryHandle(directoryHandle, targetHandle) {
+    if (!directoryHandle || !targetHandle) return Promise.resolve(null);
+
+    return Promise.resolve().then(function() {
+        if (!directoryHandle.isSameEntry || !targetHandle.isSameEntry) return false;
+        return directoryHandle.isSameEntry(targetHandle);
+    }).catch(function() {
+        return false;
+    }).then(function(isSame) {
+        if (isSame) return [];
+        if (!directoryHandle.resolve) return null;
+        return Promise.resolve(directoryHandle.resolve(targetHandle)).catch(function() {
+            return null;
+        });
+    }).then(function(relativePathParts) {
+        if (Array.isArray(relativePathParts)) return relativePathParts;
+        return findDescendantHandlePathByScan(directoryHandle, targetHandle, []);
+    }).then(function(relativePathParts) {
+        return Array.isArray(relativePathParts) ? relativePathParts : null;
+    });
+}
+
+function findAuthorizedRootMatchForHandle(targetHandle) {
+    return getAuthorizedRootHandleEntriesRaw().then(function(entries) {
+        var activeEntries = entries.filter(function(entry) {
+            return !!(entry && entry.handle);
+        });
+
+        if (activeEntries.length) return activeEntries;
+
+        return dbGet('handles', 'root_folder_handle').catch(function() {
+            return null;
+        }).then(function(legacyHandle) {
+            if (!legacyHandle) return [];
+            return [
+                {
+                    id: 'legacy_root_folder_handle',
+                    label: legacyHandle.name || '授權文件夾',
+                    handle: legacyHandle
+                }
+            ];
+        });
+    }).then(function(activeEntries) {
+        if (!activeEntries.length) {
+            return {
+                entry: null,
+                relativePathParts: null,
+                failureCode: 'NO_AUTHORIZED_ROOTS'
+            };
+        }
+
+        var hadReadableRoot = false;
+
+        function tryNext(index) {
+            if (index >= activeEntries.length) {
+                return {
+                    entry: null,
+                    relativePathParts: null,
+                    failureCode: hadReadableRoot ? 'NOT_IN_AUTHORIZED_FOLDER' : 'AUTHORIZED_ROOT_PERMISSION_DENIED'
+                };
+            }
+
+            var entry = activeEntries[index];
+            return requestReadPermissionIfNeeded(entry.handle).then(function(canRead) {
+                if (!canRead) return tryNext(index + 1);
+
+                hadReadableRoot = true;
+
+                return resolveHandleAgainstDirectoryHandle(entry.handle, targetHandle).then(function(relativePathParts) {
+                    if (relativePathParts === null) return tryNext(index + 1);
+                    return {
+                        entry: entry,
+                        relativePathParts: Array.isArray(relativePathParts) ? relativePathParts : [],
+                        failureCode: null
+                    };
+                });
+            }).catch(function() {
+                return tryNext(index + 1);
+            });
+        }
+
+        return tryNext(0);
+    });
+}
+
+function getAuthorizedRootHandleByIdOrLegacy(authorizedRootId) {
+    var id = String(authorizedRootId || '').trim();
+
+    if (!id) {
+        return dbGet('handles', 'root_folder_handle').catch(function() {
+            return null;
+        });
+    }
+
+    return getAuthorizedRootHandleEntriesRaw().then(function(entries) {
+        var matched = entries.find(function(entry) {
+            return entry.id === id && entry.handle;
+        });
+        return matched ? matched.handle : null;
+    }).then(function(handle) {
+        if (handle) return handle;
+        return dbGet('handles', 'root_folder_handle').catch(function() {
+            return null;
+        });
+    });
+}
+
+function resolveFileObjectFromDirectoryHandlePath(rootHandle, relativePath) {
+    var parts = String(relativePath || '').split('/').filter(function(part) {
+        return !!part;
+    });
+
+    if (!rootHandle || !parts.length) {
+        return Promise.reject(createAuthorizedSelectionError('INVALID_FILE_PATH', 'invalid file path'));
+    }
+
+    function walk(handle, index) {
+        var part = parts[index];
+        if (index === parts.length - 1) {
+            return handle.getFileHandle(part).then(function(fileHandle) {
+                return fileHandle.getFile();
+            });
+        }
+
+        return handle.getDirectoryHandle(part).then(function(nextHandle) {
+            return walk(nextHandle, index + 1);
+        });
+    }
+
+    return walk(rootHandle, 0);
+}
+
+function getAuthorizedArchivePickerTypes() {
+    return [
+        {
+            description: 'ZIP Archives',
+            accept: {
+                'application/zip': ['.zip'],
+                'application/octet-stream': ['.zip', '.z01', '.z02', '.z03', '.z04', '.z05', '.z06', '.z07', '.z08', '.z09']
+            }
+        }
+    ];
+}
+
+function selectAuthorizedArchiveFilesWithPicker() {
+    var pickerHost = null;
+
+    try {
+        if (typeof unsafeWindow !== 'undefined' && unsafeWindow && typeof unsafeWindow.showOpenFilePicker === 'function') {
+            pickerHost = unsafeWindow;
+        }
+    } catch (e) {}
+
+    if (!pickerHost && typeof window.showOpenFilePicker === 'function') {
+        pickerHost = window;
+    }
+
+    if (!pickerHost) {
+        return Promise.reject(createAuthorizedSelectionError(
+            'PICKER_UNSUPPORTED',
+            getAuthorizedSelectionErrorMessage('PICKER_UNSUPPORTED', '壓縮檔')
+        ));
+    }
+
+    return Promise.resolve().then(function() {
+        return pickerHost.showOpenFilePicker.call(pickerHost, {
+            multiple: true,
+            types: getAuthorizedArchivePickerTypes()
+        });
+    }).catch(function(err) {
+        if (err && err.name === 'AbortError') throw err;
+        if (err && err.code) throw err;
+        throw createAuthorizedSelectionError(
+            'PICKER_INVOCATION_FAILED',
+            getAuthorizedSelectionErrorMessage('PICKER_INVOCATION_FAILED', '壓縮檔') +
+                (err && err.message ? '：' + err.message : '')
+        );
+    }).then(function(handles) {
+        if (!handles || !handles.length) {
+            throw createAuthorizedSelectionError(
+                'EMPTY_SELECTION',
+                getAuthorizedSelectionErrorMessage('EMPTY_SELECTION', '壓縮檔')
+            );
+        }
+
+        return Promise.all(handles.map(function(handle) {
+            return findAuthorizedRootMatchForHandle(handle).then(function(matchResult) {
+                var failureCode = (matchResult && matchResult.failureCode) || 'NOT_IN_AUTHORIZED_FOLDER';
+                if (!matchResult || !matchResult.entry) {
+                    throw createAuthorizedSelectionError(
+                        failureCode,
+                        getAuthorizedSelectionErrorMessage(failureCode, '壓縮檔')
+                    );
+                }
+
+                return {
+                    handle: handle,
+                    authorizedRootEntry: matchResult.entry,
+                    relativePathParts: matchResult.relativePathParts || []
+                };
+            });
+        })).then(function(items) {
+            return Promise.all(items.map(function(item) {
+                return item.handle.getFile();
+            })).then(function(files) {
+                return {
+                    files: files,
+                    items: items
+                };
+            });
+        });
+    });
+}
+
+function selectAuthorizedDirectoryWithPicker() {
+    var pickerHost = null;
+
+    try {
+        if (typeof unsafeWindow !== 'undefined' && unsafeWindow && typeof unsafeWindow.showDirectoryPicker === 'function') {
+            pickerHost = unsafeWindow;
+        }
+    } catch (e) {}
+
+    if (!pickerHost && typeof window.showDirectoryPicker === 'function') {
+        pickerHost = window;
+    }
+
+    if (!pickerHost) {
+        return Promise.reject(createAuthorizedSelectionError(
+            'PICKER_UNSUPPORTED',
+            getAuthorizedSelectionErrorMessage('PICKER_UNSUPPORTED', '文件夾')
+        ));
+    }
+
+    return Promise.resolve().then(function() {
+        return pickerHost.showDirectoryPicker.call(pickerHost, { mode: 'read' });
+    }).catch(function(err) {
+        if (err && err.name === 'AbortError') throw err;
+        if (err && err.code) throw err;
+        throw createAuthorizedSelectionError(
+            'PICKER_INVOCATION_FAILED',
+            getAuthorizedSelectionErrorMessage('PICKER_INVOCATION_FAILED', '文件夾') +
+                (err && err.message ? '：' + err.message : '')
+        );
+    }).then(function(handle) {
+        return findAuthorizedRootMatchForHandle(handle).then(function(matchResult) {
+            var failureCode = (matchResult && matchResult.failureCode) || 'NOT_IN_AUTHORIZED_FOLDER';
+            if (!matchResult || !matchResult.entry) {
+                throw createAuthorizedSelectionError(
+                    failureCode,
+                    getAuthorizedSelectionErrorMessage(failureCode, '文件夾')
+                );
+            }
+            return {
+                handle: handle,
+                authorizedRootEntry: matchResult.entry,
+                relativePathParts: matchResult.relativePathParts || []
+            };
         });
     });
 }
@@ -999,97 +2140,93 @@ function handleManageGalleryPage() {
 
 function startFolderUpload(savedDataId) {
     flowLog('Upload', 'startFolderUpload 開始', savedDataId);
-    var fileListEntry = null;
-    try {
-        var fileLists = getFileListsSafe();
-        fileListEntry = fileLists[savedDataId] || null;
-    } catch (e) {
-        errorLog('Upload', '讀取 file_lists 失敗', e);
-        return;
-    }
 
+    var fileListEntry = readGalleryFileListById(savedDataId);
     if (!fileListEntry || !fileListEntry.files || fileListEntry.files.length === 0) {
         warnLog('Upload', '無文件列表，跳過上傳', savedDataId);
         return;
     }
 
-    var folderName = fileListEntry.folderName || null;
     var files = fileListEntry.files;
-    flowLog('Upload', '文件資訊', { folderName: folderName, count: files.length });
+    flowLog('Upload', '文件資訊', {
+        folderName: fileListEntry.folderName || null,
+        authorizedRootId: fileListEntry.authorizedRootId || null,
+        count: files.length
+    });
 
-    if (!folderName) {
-        warnLog('Upload', '無 folderName，無法解析路徑，跳過上傳');
+    if (fileListEntry.sourceType !== 'folder') {
+        warnLog('Upload', '非文件夾來源，跳過上傳');
         return;
     }
 
-    dbGet('handles', 'root_folder_handle').then(function(rootHandle) {
+    getAuthorizedRootHandleByIdOrLegacy(fileListEntry.authorizedRootId).then(function(rootHandle) {
         if (!rootHandle) {
-            errorLog('Upload', '無 root_folder_handle，請在 Setting 中設定根目錄');
+            errorLog('Upload', '無已授權文件夾 handle，請在 Setting 中設定授權文件夾');
             return;
         }
-        _debug('[Upload] 取得 root_folder_handle，進入子資料夾:', folderName);
-        return rootHandle.requestPermission({ mode: 'read' }).then(function(perm) {
-            if (perm !== 'granted') {
-                errorLog('Upload', '根目錄無讀取權限');
+
+        return requestReadPermissionIfNeeded(rootHandle).then(function(canRead) {
+            if (!canRead) {
+                errorLog('Upload', '授權文件夾無讀取權限');
                 return;
             }
-            return rootHandle.getDirectoryHandle(folderName).then(function(folderHandle) {
-                flowLog('Upload', '成功取得資料夾 handle', folderName);
-                var filePromises = files.map(function(fileEntry) {
-                    var parts = (fileEntry.path || fileEntry.name || '').split('/');
-                    function resolveHandle(handle, parts) {
-                        if (parts.length === 1) {
-                            return handle.getFileHandle(parts[0]).then(function(fh) { return fh.getFile(); });
-                        }
-                        return handle.getDirectoryHandle(parts[0]).then(function(dh) {
-                            return resolveHandle(dh, parts.slice(1));
-                        });
-                    }
-                    return resolveHandle(folderHandle, parts).catch(function(err) {
-                        warnLog('Upload', '無法解析檔案', { path: fileEntry.path, message: err.message });
-                        return null;
-                    });
+
+            var filePromises = files.map(function(fileEntry) {
+                var sourcePath = String((fileEntry && (fileEntry.path || fileEntry.originalPath || fileEntry.name)) || '');
+                var uploadName = getGalleryFileUploadName(fileEntry);
+
+                if (!sourcePath) {
+                    warnLog('Upload', '缺少原始檔案路徑，無法上傳', { fileEntry: fileEntry });
+                    return Promise.resolve(null);
+                }
+
+                return resolveFileObjectFromDirectoryHandlePath(rootHandle, sourcePath).then(function(fileObj) {
+                    return createRenamedUploadFile(fileObj, uploadName);
+                }).catch(function(err) {
+                    warnLog('Upload', '無法解析檔案', { path: sourcePath, message: err.message });
+                    return null;
                 });
-                return Promise.all(filePromises).then(function(fileObjs) {
-                    fileObjs = fileObjs.filter(function(f) { return f !== null; });
-                    flowLog('Upload', '成功解析 File 物件', fileObjs.length);
-                    if (fileObjs.length === 0) {
-                        warnLog('Upload', '無有效 File 物件，跳過上傳');
+            });
+
+            return Promise.all(filePromises).then(function(fileObjs) {
+                fileObjs = fileObjs.filter(function(f) { return f !== null; });
+                flowLog('Upload', '成功解析 File 物件', fileObjs.length);
+                if (fileObjs.length === 0) {
+                    warnLog('Upload', '無有效 File 物件，跳過上傳');
+                    return;
+                }
+
+                function waitForMultiUploadBtn(retries) {
+                    if (retries <= 0) {
+                        errorLog('Upload', 'Multi Upload 按鈕等待超時');
                         return;
                     }
-                    function waitForMultiUploadBtn(retries) {
-                        if (retries <= 0) {
-                            errorLog('Upload', 'Multi Upload 按鈕等待超時');
-                            return;
-                        }
-                        var btn = Array.from(document.querySelectorAll('button')).find(function(b) {
-                            return b.textContent.trim() === 'Multi Upload';
-                        });
-                        if (!btn) {
-                            _debug('[Upload] 等待 Multi Upload 按鈕...');
-                            setTimeout(function() { waitForMultiUploadBtn(retries - 1); }, 500);
-                            return;
-                        }
-                        var parent = btn.parentElement;
-                        var hiddenInput = parent ? Array.from(parent.querySelectorAll('input[type="file"]')).find(function(i) {
-                            return i.style.display === 'none' && i.multiple;
-                        }) : null;
-                        if (!hiddenInput) {
-                            _debug('[Upload] 等待 hiddenInput...');
-                            setTimeout(function() { waitForMultiUploadBtn(retries - 1); }, 500);
-                            return;
-                        }
-                        flowLog('Upload', '找到 Multi Upload hiddenInput，開始注入', fileObjs.length);
-                        var dt = new DataTransfer();
-                        fileObjs.forEach(function(f) { dt.items.add(f); });
-                        hiddenInput.files = dt.files;
-                        hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
-                        flowLog('Upload', 'change 事件已觸發，上傳腳本接管');
+                    var btn = Array.from(document.querySelectorAll('button')).find(function(b) {
+                        return b.textContent.trim() === 'Multi Upload';
+                    });
+                    if (!btn) {
+                        _debug('[Upload] 等待 Multi Upload 按鈕...');
+                        setTimeout(function() { waitForMultiUploadBtn(retries - 1); }, 500);
+                        return;
                     }
-                    waitForMultiUploadBtn(20);
-                });
-            }).catch(function(err) {
-                errorLog('Upload', '無法取得資料夾 handle', { folderName: folderName, message: err.message });
+                    var parent = btn.parentElement;
+                    var hiddenInput = parent ? Array.from(parent.querySelectorAll('input[type="file"]')).find(function(i) {
+                        return i.style.display === 'none' && i.multiple;
+                    }) : null;
+                    if (!hiddenInput) {
+                        _debug('[Upload] 等待 hiddenInput...');
+                        setTimeout(function() { waitForMultiUploadBtn(retries - 1); }, 500);
+                        return;
+                    }
+                    flowLog('Upload', '找到 Multi Upload hiddenInput，開始注入', fileObjs.length);
+                    var dt = new DataTransfer();
+                    fileObjs.forEach(function(f) { dt.items.add(f); });
+                    hiddenInput.files = dt.files;
+                    hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+                    flowLog('Upload', 'change 事件已觸發，上傳腳本接管');
+                }
+
+                waitForMultiUploadBtn(20);
             });
         });
     }).catch(function(err) {
@@ -1245,6 +2382,336 @@ function createGoBtn() {
     return btn;
 }
 
+function getGalleryGroupsFromTbody(tbody) {
+    var allTrs = tbody ? tbody.querySelectorAll('tr:not(.gtr)') : [];
+    var groups = [];
+    var currentGroup = [];
+
+    Array.prototype.forEach.call(allTrs || [], function(tr) {
+        currentGroup.push(tr);
+        if (currentGroup.length === 2) {
+            groups.push(currentGroup);
+            currentGroup = [];
+        }
+    });
+
+    return groups;
+}
+
+function getCheckedGalleryGroupsFromTbody(tbody) {
+    return getGalleryGroupsFromTbody(tbody).filter(function(group) {
+        var tr1 = group[0];
+        var cb = tr1 ? tr1.querySelector('td.gtc6 input[type="checkbox"]') : null;
+        return !!(cb && cb.checked);
+    });
+}
+
+function getGalleryGroupFields(group) {
+    var tr1 = group && group[0];
+    var tr2 = group && group[1];
+    if (!tr1 || !tr2) return null;
+
+    var selects = tr1.querySelectorAll('td.gtc4 select');
+    var checkboxes = tr2.querySelectorAll('td.gtc-options input[type="checkbox"]');
+
+    return {
+        group: group,
+        tr1: tr1,
+        tr2: tr2,
+        titleInput: tr1.querySelector('td.gtc1 input'),
+        jpTitleInput: tr2.querySelector('td.gtc1 input'),
+        filesCell: tr1.querySelector('td.gtc3'),
+        categorySelect: selects[0] || null,
+        languageSelect: selects[1] || null,
+        folderSelect: selects[2] || null,
+        mtlCheckbox: checkboxes[0] || null,
+        officialCheckbox: checkboxes[1] || null,
+        aiGeneratedCheckbox: checkboxes[2] || null,
+        anthologyCheckbox: checkboxes[3] || null,
+        translatedCheckbox: checkboxes[4] || null,
+        decensoredCheckbox: checkboxes[5] || null,
+        incompleteCheckbox: checkboxes[6] || null,
+        rewriteCheckbox: checkboxes[7] || null,
+        colorizedCheckbox: checkboxes[8] || null,
+        ongoingCheckbox: checkboxes[9] || null,
+        digitalCheckbox: checkboxes[10] || null,
+        sampleCheckbox: checkboxes[11] || null,
+        mtlContainer: tr2.querySelector('td.gtc-options > span:first-child'),
+        commentTextarea: tr2.querySelector('td.gtc-options textarea.uploader-comment-ta'),
+        romanBtn: Array.from(tr2.querySelectorAll('button')).find(function(btn) {
+            return btn.textContent === 'Romanization';
+        }) || null
+    };
+}
+
+function getGalleryGroupLanguageDefaultControls(tr2) {
+    if (!tr2) return null;
+    return {
+        mtlCheckbox: tr2.querySelectorAll('td.gtc-options input[type="checkbox"]')[0] || null,
+        officialCheckbox: tr2.querySelectorAll('td.gtc-options input[type="checkbox"]')[1] || null,
+        aiGeneratedCheckbox: tr2.querySelectorAll('td.gtc-options input[type="checkbox"]')[2] || null,
+        translatedCheckbox: tr2.querySelectorAll('td.gtc-options input[type="checkbox"]')[4] || null,
+        rewriteCheckbox: tr2.querySelectorAll('td.gtc-options input[type="checkbox"]')[7] || null,
+        mtlContainer: tr2.querySelector('td.gtc-options > span:first-child')
+    };
+}
+
+function applyLanguageDefaultsByControls(languageValue, controls, settingsOverride) {
+    if (!controls) return;
+
+    var settings = Object.assign({}, getDefaultSettings(), getCurrentSettingsSafe() || {}, settingsOverride || {});
+    var langValue = String(languageValue == null ? '' : languageValue);
+    var isJapanese = langValue === '0';
+
+    if (!isJapanese && settings.nonJapaneseDefaultTranslated) {
+        if (controls.translatedCheckbox) controls.translatedCheckbox.checked = true;
+        if (controls.officialCheckbox) controls.officialCheckbox.checked = false;
+        if (controls.rewriteCheckbox) controls.rewriteCheckbox.checked = false;
+        if (controls.mtlContainer) controls.mtlContainer.style.display = 'inline-flex';
+        if (controls.mtlCheckbox) controls.mtlCheckbox.checked = !!settings.translatedDefaultMTL;
+    }
+
+    if (isJapanese && settings.japaneseDefaultOfficialTextless) {
+        if (controls.officialCheckbox) controls.officialCheckbox.checked = true;
+        if (controls.translatedCheckbox) controls.translatedCheckbox.checked = false;
+        if (controls.rewriteCheckbox) controls.rewriteCheckbox.checked = false;
+        if (controls.mtlContainer) controls.mtlContainer.style.display = 'none';
+        if (controls.mtlCheckbox) controls.mtlCheckbox.checked = false;
+    }
+
+    if (isJapanese && controls.aiGeneratedCheckbox) {
+        controls.aiGeneratedCheckbox.checked = settings.japaneseDefaultAIGenerated !== false;
+    }
+}
+
+function handleGalleryLanguageControlChange(languageSelect, settingsOverride) {
+    if (!languageSelect) return;
+    var tr1 = languageSelect.closest('tr');
+    var tr2 = tr1 ? tr1.nextElementSibling : null;
+    applyLanguageDefaultsByControls(languageSelect.value, getGalleryGroupLanguageDefaultControls(tr2), settingsOverride);
+}
+
+function setGalleryGroupSelectValue(selectEl, value) {
+    if (!selectEl) return;
+    selectEl.value = value;
+    selectEl.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function updateWaitingCreateCount(folderRow1, waitingCreateCountRef, delta) {
+    if (!waitingCreateCountRef || typeof waitingCreateCountRef.value !== 'number') return;
+    waitingCreateCountRef.value = Math.max(0, waitingCreateCountRef.value + delta);
+    var folderStrong = folderRow1 ? folderRow1.querySelector('strong') : null;
+    if (folderStrong) folderStrong.textContent = waitingCreateCountRef.value;
+}
+
+function getGalleryGroupSavedDataId(fields) {
+    if (!fields || !fields.tr2) return null;
+    var id = String(fields.tr2.dataset.savedDataId || '').trim();
+    return id || null;
+}
+
+function buildGalleryDataFromFields(fields) {
+    var existingId = getGalleryGroupSavedDataId(fields);
+    return {
+        id: existingId || (Date.now() + '_' + (fields.titleInput ? fields.titleInput.value : '')),
+        title1: fields.titleInput ? fields.titleInput.value : '',
+        title2: fields.jpTitleInput ? fields.jpTitleInput.value : '',
+        files: fields.filesCell ? fields.filesCell.textContent : 'N/A',
+        category: fields.categorySelect ? fields.categorySelect.value : 'Doujinshi',
+        language: fields.languageSelect ? fields.languageSelect.value : '0',
+        folder: fields.folderSelect ? fields.folderSelect.value : 'Unsorted',
+        options: {
+            official: fields.officialCheckbox ? fields.officialCheckbox.checked : false,
+            translated: fields.translatedCheckbox ? fields.translatedCheckbox.checked : false,
+            rewrite: fields.rewriteCheckbox ? fields.rewriteCheckbox.checked : false,
+            digital: fields.digitalCheckbox ? fields.digitalCheckbox.checked : false,
+            decensored: fields.decensoredCheckbox ? fields.decensoredCheckbox.checked : false,
+            aiGenerated: fields.aiGeneratedCheckbox ? fields.aiGeneratedCheckbox.checked : false,
+            colorized: fields.colorizedCheckbox ? fields.colorizedCheckbox.checked : false,
+            textless: false,
+            incomplete: fields.incompleteCheckbox ? fields.incompleteCheckbox.checked : false,
+            sample: fields.sampleCheckbox ? fields.sampleCheckbox.checked : false,
+            anthology: fields.anthologyCheckbox ? fields.anthologyCheckbox.checked : false,
+            ongoing: fields.ongoingCheckbox ? fields.ongoingCheckbox.checked : false
+        },
+        mtl: fields.mtlCheckbox ? fields.mtlCheckbox.checked : false,
+        comment: fields.commentTextarea ? fields.commentTextarea.value : '',
+        timestamp: Date.now()
+    };
+}
+
+function persistGalleryGroup(fields) {
+    var galleryData = buildGalleryDataFromFields(fields);
+    upsertSavedGallery(galleryData);
+    if (fields && fields.tr2) fields.tr2.dataset.savedDataId = galleryData.id;
+    return galleryData;
+}
+
+function buildPendingCreateDataFromFields(fields) {
+    var categoryMap = {
+        'Doujinshi': '2',
+        'Manga': '3',
+        'Artist CG': '4',
+        'Game CG': '5',
+        'Western': '10',
+        'Non-H': '9',
+        'Image Set': '6',
+        'Cosplay': '7',
+        'Misc': '1'
+    };
+    var langTypeVal = '0';
+
+    if (fields.translatedCheckbox && fields.translatedCheckbox.checked) langTypeVal = '1';
+    else if (fields.rewriteCheckbox && fields.rewriteCheckbox.checked) langTypeVal = '2';
+
+    var mainVal = fields.titleInput ? fields.titleInput.value : '';
+    var jpVal = fields.jpTitleInput ? fields.jpTitleInput.value : '';
+
+    if (mainVal && !jpVal) jpVal = mainVal;
+    else if (!mainVal && jpVal) mainVal = jpVal;
+
+    return {
+        id: Date.now() + '_' + mainVal,
+        title1: mainVal,
+        title2: jpVal,
+        files: fields.filesCell ? fields.filesCell.textContent : 'N/A',
+        category: categoryMap[fields.categorySelect ? fields.categorySelect.value : 'Doujinshi'] || '2',
+        categoryText: fields.categorySelect ? fields.categorySelect.value : 'Doujinshi',
+        language: fields.languageSelect ? fields.languageSelect.value : '0',
+        folder: fields.folderSelect ? fields.folderSelect.value : 'Unsorted',
+        langtype: langTypeVal,
+        mtl: fields.mtlCheckbox ? fields.mtlCheckbox.checked : false,
+        comment: fields.commentTextarea ? fields.commentTextarea.value : '',
+        savedDataId: getGalleryGroupSavedDataId(fields),
+        options: {
+            official: fields.officialCheckbox ? fields.officialCheckbox.checked : false,
+            translated: fields.translatedCheckbox ? fields.translatedCheckbox.checked : false,
+            rewrite: fields.rewriteCheckbox ? fields.rewriteCheckbox.checked : false,
+            digital: fields.digitalCheckbox ? fields.digitalCheckbox.checked : false,
+            decensored: fields.decensoredCheckbox ? fields.decensoredCheckbox.checked : false,
+            aiGenerated: fields.aiGeneratedCheckbox ? fields.aiGeneratedCheckbox.checked : false,
+            colorized: fields.colorizedCheckbox ? fields.colorizedCheckbox.checked : false,
+            textless: false,
+            incomplete: fields.incompleteCheckbox ? fields.incompleteCheckbox.checked : false,
+            sample: fields.sampleCheckbox ? fields.sampleCheckbox.checked : false,
+            anthology: fields.anthologyCheckbox ? fields.anthologyCheckbox.checked : false,
+            ongoing: fields.ongoingCheckbox ? fields.ongoingCheckbox.checked : false
+        }
+    };
+}
+
+function runGalleryGroupRomanization(fields) {
+    if (!fields || !fields.titleInput || !fields.jpTitleInput || !fields.romanBtn) {
+        return Promise.resolve(false);
+    }
+
+    var jpText = String(fields.jpTitleInput.value || '').trim();
+    if (!jpText) return Promise.resolve(false);
+
+    return Promise.resolve(convertToRomaji(jpText, fields.romanBtn, fields.titleInput)).then(function() {
+        return true;
+    }).catch(function(err) {
+        errorLog('BulkRomanization', '批量轉換失敗', {
+            message: err && (err.message || String(err)),
+            title: jpText
+        });
+        return false;
+    });
+}
+
+function applyGalleryOptionStateToFields(fields, optionState) {
+    if (!fields) return;
+    optionState = optionState || {};
+
+    if (fields.officialCheckbox) fields.officialCheckbox.checked = !!optionState.official;
+    if (fields.translatedCheckbox) fields.translatedCheckbox.checked = !!optionState.translated;
+    if (fields.rewriteCheckbox) fields.rewriteCheckbox.checked = !!optionState.rewrite;
+    if (fields.digitalCheckbox) fields.digitalCheckbox.checked = !!optionState.digital;
+    if (fields.decensoredCheckbox) fields.decensoredCheckbox.checked = !!optionState.decensored;
+    if (fields.aiGeneratedCheckbox) fields.aiGeneratedCheckbox.checked = !!optionState.aiGenerated;
+    if (fields.colorizedCheckbox) fields.colorizedCheckbox.checked = !!optionState.colorized;
+    if (fields.incompleteCheckbox) fields.incompleteCheckbox.checked = !!optionState.incomplete;
+    if (fields.sampleCheckbox) fields.sampleCheckbox.checked = !!optionState.sample;
+    if (fields.ongoingCheckbox) fields.ongoingCheckbox.checked = !!optionState.ongoing;
+    if (fields.anthologyCheckbox) fields.anthologyCheckbox.checked = !!optionState.anthology;
+
+    if (fields.mtlContainer) {
+        fields.mtlContainer.style.display = optionState.translated ? 'inline-flex' : 'none';
+    }
+
+    if (fields.mtlCheckbox) {
+        fields.mtlCheckbox.checked = !!(optionState.translated && optionState.mtl);
+        if (!optionState.translated) fields.mtlCheckbox.checked = false;
+    }
+}
+
+function deleteGalleryGroupByFields(fields, folderRow1, waitingCreateCountRef) {
+    if (!fields || !fields.group || !fields.group.length) return false;
+
+    var savedDataId = getGalleryGroupSavedDataId(fields);
+    fields.group.forEach(function(tr) {
+        if (tr && tr.parentNode) tr.parentNode.removeChild(tr);
+    });
+
+    updateWaitingCreateCount(folderRow1, waitingCreateCountRef, -1);
+
+    if (savedDataId) {
+        try {
+            removeSavedGalleryById(savedDataId);
+            deleteGalleryFileListById(savedDataId);
+        } catch (err) {
+            errorLog('DeleteGallery', '刪除保存資料失敗', err);
+        }
+    }
+
+    return true;
+}
+
+function resetDeleteTriggerState(btn) {
+    if (!btn) return;
+    if (btn.__fifybujDeleteTriggerTimer) {
+        clearTimeout(btn.__fifybujDeleteTriggerTimer);
+        btn.__fifybujDeleteTriggerTimer = null;
+    }
+    if (btn.__fifybujDeleteTriggerController && typeof btn.__fifybujDeleteTriggerController.restore === 'function') {
+        btn.__fifybujDeleteTriggerController.restore();
+    }
+    btn.__fifybujDeleteTriggerController = null;
+    btn.__fifybujDeleteTriggerPending = false;
+    btn.__fifybujDeleteTriggerExpireAt = 0;
+}
+
+function triggerDeleteBySettings(btn, onConfirmed) {
+    var settings = Object.assign({}, getDefaultSettings(), getCurrentSettingsSafe() || {});
+
+    if (!settings.deleteDoubleConfirm) {
+        resetDeleteTriggerState(btn);
+        onConfirmed();
+        return true;
+    }
+
+    var isPending = !!btn.__fifybujDeleteTriggerPending && Date.now() <= (btn.__fifybujDeleteTriggerExpireAt || 0);
+
+    if (!isPending) {
+        resetDeleteTriggerState(btn);
+        btn.__fifybujDeleteTriggerPending = true;
+        btn.__fifybujDeleteTriggerExpireAt = Date.now() + (settings.doubleConfirmMs || 1000);
+        btn.__fifybujDeleteTriggerController = _beginFeedbackState(btn, {
+            restoreText: _getFeedbackElementText(btn),
+            useColor: true,
+            colorType: 'error'
+        });
+        btn.__fifybujDeleteTriggerTimer = setTimeout(function() {
+            resetDeleteTriggerState(btn);
+        }, settings.doubleConfirmMs || 1000);
+        return false;
+    }
+
+    resetDeleteTriggerState(btn);
+    onConfirmed();
+    return true;
+}
+
 function getFilesTextCenter() {
     var th = document.querySelector('.s[data-custom="true"] th.h3');
     if (!th) return null;
@@ -1298,60 +2765,14 @@ function applyToChecked(tbody, callback) {
 // ==================== 頂層函數：allSaveChecked ====================
 
 function allSaveChecked(tbody, folderRow1) {
-    var allTrs = tbody.querySelectorAll('tr:not(.gtr)');
-    var groups = [];
-    var currentGroup = [];
     var savedCount = 0;
 
-    allTrs.forEach(function(tr) {
-        currentGroup.push(tr);
-        if (currentGroup.length === 2) { groups.push(currentGroup); currentGroup = []; }
-    });
-
-    groups.forEach(function(group) {
-        var tr1 = group[0];
-        var tr2 = group[1];
-        var cb = tr1.querySelector('td.gtc6 input[type="checkbox"]');
-        if (!cb || !cb.checked) return;
-
-        var titleInput = tr1.querySelector('td.gtc1 input');
-        var filesText = tr1.querySelector('td.gtc3');
-        var selects = tr1.querySelectorAll('td.gtc4 select');
-        var title2Input = tr2.querySelector('td.gtc1 input');
-        var checkboxes = tr2.querySelectorAll('td.gtc-options input[type="checkbox"]');
-        var commentTA = tr2.querySelector('td.gtc-options textarea.uploader-comment-ta');
-        var existingId = tr2.dataset.savedDataId || null;
-
-        var galleryData = {
-            id: existingId || (Date.now() + '_' + (titleInput ? titleInput.value : '')),
-            title1: titleInput ? titleInput.value : '',
-            title2: title2Input ? title2Input.value : '',
-            files: filesText ? filesText.textContent : 'N/A',
-            category: selects[0] ? selects[0].value : 'Doujinshi',
-            language: selects[1] ? selects[1].value : '0',
-            folder: selects[2] ? selects[2].value : 'Unsorted',
-            options: {
-                official: checkboxes[1] ? checkboxes[1].checked : false,
-                translated: checkboxes[4] ? checkboxes[4].checked : false,
-                rewrite: checkboxes[7] ? checkboxes[7].checked : false,
-                digital: checkboxes[10] ? checkboxes[10].checked : false,
-                decensored: checkboxes[5] ? checkboxes[5].checked : false,
-                aiGenerated: checkboxes[2] ? checkboxes[2].checked : false,
-                colorized: checkboxes[8] ? checkboxes[8].checked : false,
-                textless: false,
-                incomplete: checkboxes[6] ? checkboxes[6].checked : false,
-                sample: checkboxes[11] ? checkboxes[11].checked : false,
-                anthology: checkboxes[3] ? checkboxes[3].checked : false,
-                ongoing: checkboxes[9] ? checkboxes[9].checked : false
-            },
-            mtl: checkboxes[0] ? checkboxes[0].checked : false,
-            comment: commentTA ? commentTA.value : '',
-            timestamp: Date.now()
-        };
+    getCheckedGalleryGroupsFromTbody(tbody).forEach(function(group) {
+        var fields = getGalleryGroupFields(group);
+        if (!fields) return;
 
         try {
-            upsertSavedGallery(galleryData);
-            tr2.dataset.savedDataId = galleryData.id;
+            persistGalleryGroup(fields);
             savedCount++;
         } catch (err) {
             errorLog('BulkSave', '批量保存失敗', err);
@@ -1362,67 +2783,19 @@ function allSaveChecked(tbody, folderRow1) {
         opLog('批量 Save', { count: savedCount });
         refreshShowFileListPanelIfOpen();
     }
+
+    return savedCount;
 }
 
 // ==================== 頂層函數：allCreateChecked ====================
 
 function allCreateChecked(tbody) {
-    var allTrs = tbody.querySelectorAll('tr:not(.gtr)');
-    var groups = [];
-    var currentGroup = [];
-    allTrs.forEach(function(tr) {
-        currentGroup.push(tr);
-        if (currentGroup.length === 2) { groups.push(currentGroup); currentGroup = []; }
-    });
     var pendingQueue = [];
-    groups.forEach(function(group) {
-        var tr1 = group[0];
-        var tr2 = group[1];
-        var cb = tr1.querySelector('td.gtc6 input[type="checkbox"]');
-        if (!cb || !cb.checked) return;
 
-        var titleInput = tr1.querySelector('td.gtc1 input');
-        var filesText = tr1.querySelector('td.gtc3');
-        var selects = tr1.querySelectorAll('td.gtc4 select');
-        var title2Input = tr2.querySelector('td.gtc1 input');
-        var checkboxes = tr2.querySelectorAll('td.gtc-options input[type="checkbox"]');
-        var commentTA = tr2.querySelector('td.gtc-options textarea.uploader-comment-ta');
-
-        var categoryMap = { 'Doujinshi': '2', 'Manga': '3', 'Artist CG': '4', 'Game CG': '5', 'Western': '10', 'Non-H': '9', 'Image Set': '6', 'Cosplay': '7', 'Misc': '1' };
-        var langTypeVal = '0';
-        if (checkboxes[4] && checkboxes[4].checked) langTypeVal = '1';
-        else if (checkboxes[7] && checkboxes[7].checked) langTypeVal = '2';
-
-        var catVal = selects[0] ? selects[0].value : 'Doujinshi';
-        var pendingData = {
-            id: Date.now() + '_' + (titleInput ? titleInput.value : ''),
-            title1: titleInput ? titleInput.value : '',
-            title2: title2Input ? title2Input.value : '',
-            files: filesText ? filesText.textContent : 'N/A',
-            category: categoryMap[catVal] || '2',
-            categoryText: catVal,
-            language: selects[1] ? selects[1].value : '0',
-            folder: selects[2] ? selects[2].value : 'Unsorted',
-            langtype: langTypeVal,
-            mtl: checkboxes[0] ? checkboxes[0].checked : false,
-            comment: commentTA ? commentTA.value : '',
-            savedDataId: tr2.dataset.savedDataId || null,
-            options: {
-                official: checkboxes[1] ? checkboxes[1].checked : false,
-                translated: checkboxes[4] ? checkboxes[4].checked : false,
-                rewrite: checkboxes[7] ? checkboxes[7].checked : false,
-                digital: checkboxes[10] ? checkboxes[10].checked : false,
-                decensored: checkboxes[5] ? checkboxes[5].checked : false,
-                aiGenerated: checkboxes[2] ? checkboxes[2].checked : false,
-                colorized: checkboxes[8] ? checkboxes[8].checked : false,
-                textless: false,
-                incomplete: checkboxes[6] ? checkboxes[6].checked : false,
-                sample: checkboxes[11] ? checkboxes[11].checked : false,
-                anthology: checkboxes[3] ? checkboxes[3].checked : false,
-                ongoing: checkboxes[9] ? checkboxes[9].checked : false
-            }
-        };
-        pendingQueue.push(pendingData);
+    getCheckedGalleryGroupsFromTbody(tbody).forEach(function(group) {
+        var fields = getGalleryGroupFields(group);
+        if (!fields) return;
+        pendingQueue.push(buildPendingCreateDataFromFields(fields));
     });
 
     if (pendingQueue.length > 0) {
@@ -1432,48 +2805,47 @@ function allCreateChecked(tbody) {
             GM_openInTab('https://upload.e-hentai.org/managegallery?act=new', { active: false });
         });
     }
+
+    return pendingQueue.length;
+}
+
+function allRomanizationChecked(tbody) {
+    var groups = getCheckedGalleryGroupsFromTbody(tbody);
+    var count = 0;
+
+    return groups.reduce(function(chain, group) {
+        return chain.then(function() {
+            var fields = getGalleryGroupFields(group);
+            if (!fields) return false;
+
+            return runGalleryGroupRomanization(fields).then(function(ok) {
+                if (ok) count++;
+                return ok;
+            });
+        });
+    }, Promise.resolve()).then(function() {
+        if (count > 0) opLog('批量 Romanization', { count: count });
+        return count;
+    });
 }
 
 // ==================== 頂層函數：allDeleteChecked ====================
 
 function allDeleteChecked(tbody, folderRow1, waitingCreateCountRef) {
-    var allTrs = tbody.querySelectorAll('tr:not(.gtr)');
-    var groups = [];
-    var currentGroup = [];
-    allTrs.forEach(function(tr) {
-        currentGroup.push(tr);
-        if (currentGroup.length === 2) { groups.push(currentGroup); currentGroup = []; }
-    });
-    var toDelete = [];
-    groups.forEach(function(group) {
-        var tr1 = group[0];
-        var cb = tr1.querySelector('td.gtc6 input[type="checkbox"]');
-        if (cb && cb.checked) toDelete.push(group);
-    });
-
     var deletedCount = 0;
-    toDelete.forEach(function(group) {
-        var tr2 = group[1];
-        var sid = tr2.dataset.savedDataId;
-        group.forEach(function(tr) { tr.remove(); });
-        waitingCreateCountRef.value--;
-        deletedCount++;
-        if (sid) {
-            try {
-                removeSavedGalleryById(sid);
-                deleteGalleryFileListById(sid);
-            } catch (err) {
-                errorLog('BulkDelete', '批量刪除保存資料失敗', err);
-            }
-        }
+
+    getCheckedGalleryGroupsFromTbody(tbody).forEach(function(group) {
+        var fields = getGalleryGroupFields(group);
+        if (!fields) return;
+        if (deleteGalleryGroupByFields(fields, folderRow1, waitingCreateCountRef)) deletedCount++;
     });
 
-    var folderStrong1 = folderRow1.querySelector('strong');
-    if (folderStrong1) folderStrong1.textContent = Math.max(0, waitingCreateCountRef.value);
-    refreshShowFileListPanelIfOpen();
     if (deletedCount > 0) {
+        refreshShowFileListPanelIfOpen();
         opLog('批量 Delete', { count: deletedCount });
     }
+
+    return deletedCount;
 }
 
 // ==================== 頂層函數：fixAllGroups ====================
@@ -1531,8 +2903,9 @@ var JAPANESE_VARIANT_CHAR_MAP = {
     '驛': '駅', '龜': '亀', '嶽': '岳', '冩': '写'
 };
 function dictDebug(stage, payload) {
-    try { console.log('[DictDebug]', stage, payload); } catch (e) {}
-    try { _debug('[DictDebug]', stage, payload); } catch (e2) {}
+    try { _debug('[DictDebug]', stage, payload); } catch (e) {}
+    return;
+    try { _debug('[DictDebug]', stage, payload); } catch (e) {}
 }
 
 var NUMERIC_KANJI_MAP = {
@@ -3784,8 +5157,10 @@ var ENABLE_ROMANIZATION_TRACE = true;
 
 function traceRomanization(stage, payload) {
     if (!ENABLE_ROMANIZATION_TRACE) return;
-    try { console.log('[RomanizationTrace]', stage, payload); } catch (e) {}
-    try { _debug('[RomanizationTrace]', stage, payload); } catch (e2) {}
+    try { _debug('[RomanizationTrace]', stage, payload); } catch (e) {}
+    return;
+    if (!ENABLE_ROMANIZATION_TRACE) return;
+    try { _debug('[RomanizationTrace]', stage, payload); } catch (e) {}
 }
 
 function setRomanizationButtonError(btn, text) {
@@ -3949,7 +5324,9 @@ function makeExternalStatusRow(label, statusText, statusOk) {
 }
 
 function renderJMdictItemsRewritten(jmdictItemsDiv) {
-    jmdictItemsDiv.innerHTML = '';
+    if (!jmdictItemsDiv) return;
+    var renderToken = Date.now() + '_' + Math.random().toString(36).slice(2);
+    jmdictItemsDiv.__renderToken = renderToken;
     Promise.all([
         dbGet('dicts', 'jmdict_data'),
         dbGet('dicts', 'jmdict_download_time'),
@@ -3963,6 +5340,8 @@ function renderJMdictItemsRewritten(jmdictItemsDiv) {
         dbGet('dicts', 'kanji_char_reading_index'),
         dbGet('dicts', 'kanji_variant_map')
     ]).then(function(results) {
+        if (jmdictItemsDiv.__renderToken !== renderToken) return;
+        jmdictItemsDiv.innerHTML = '';
         var jmdictData = results[0];
         var jmdictTime = results[1];
         var expIndex = results[2];
@@ -5069,7 +6448,7 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
     td2_1.appendChild(inputTitle2);
 
     var tplRow = document.createElement('div');
-    tplRow.style.cssText = 'display: flex; justify-content: flex-start; align-items: center; gap: 4px; margin-top: 2px;';
+    tplRow.style.cssText = 'display: flex; justify-content: flex-start; align-items: center; gap: 4px; margin-top: 2px; width: 100%; box-sizing: border-box; padding-right: 4px;';
 
     var tplLabel = document.createElement('span');
     tplLabel.textContent = 'Comment Template:';
@@ -5117,7 +6496,7 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
     romanBtn.style.cssText = 'background-color: #E0DED3; border: 1px solid #5C0D12; color: #5C0D12; font-weight: bold; font-size: 9pt; padding: 0 6px; cursor: pointer; border-radius: 3px; white-space: nowrap; height: 18px; line-height: 16px; box-sizing: border-box; flex-shrink: 0;';
     romanBtn.addEventListener('click', function(e) {
         e.preventDefault();
-        convertToRomaji(inputTitle2.value.trim(), romanBtn, inputTitle);
+        runGalleryGroupRomanization(getGalleryGroupFields([tr1, tr2]));
     });
     tplRow.appendChild(romanBtn);
     td2_1.appendChild(tplRow);
@@ -5139,81 +6518,106 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
     td2_2.appendChild(swapBtn);
 
     var savedDataId = (savedData && savedData.id && savedData.id !== 'undefined') ? savedData.id : null;
+    if (savedDataId) tr2.dataset.savedDataId = savedDataId;
 
     var zipBtn = document.createElement('button');
     zipBtn.textContent = 'ZIP';
     zipBtn.style.cssText = 'background-color: #E0DED3; border: 1px solid #5C0D12; color: #5C0D12; font-weight: bold; font-size: 8pt; height: 18px; line-height: 16px; cursor: pointer; border-radius: 2px; display: block; box-sizing: border-box; padding: 0 4px; margin: 2px 0 0 0; white-space: nowrap; width: 26px;';
-
-    var zipInput = document.createElement('input');
-    zipInput.type = 'file';
-    zipInput.accept = '.zip,.z01,.z02,.z03,.z04,.z05,.z06,.z07,.z08,.z09';
-    zipInput.multiple = true;
-    zipInput.style.display = 'none';
-    zipInput.addEventListener('change', function() {
-        var files = Array.from(zipInput.files);
-        if (!files.length) return;
-        flowLog('ZIP', '開始處理壓縮檔', files.map(function(f) { return f.name; }).join(', '));
-        var confirmColorMs = currentSettings.confirmBtnColorMs || 1000;
-
-        handleArchiveFiles(files, archiveStatusBtn, function(results) {
-            if (results.length === 0) return;
-            var allFiles = [];
-            results.forEach(function(r) { allFiles = allFiles.concat(r.files); });
-            allFiles.sort(function(a, b) { return naturalCompare(a.path, b.path); });
-
-            if (allFiles.length > MAX_FILES) {
-                warnLog('ZIP', '文件數超過限制，截斷', { limit: MAX_FILES, original: allFiles.length });
-                allFiles = allFiles.slice(0, MAX_FILES);
-            }
-
-            opLog('解壓完成', { count: allFiles.length, source: 'ZIP' });
-            filesSpan.textContent = allFiles.length;
-            requestAnimationFrame(function() { alignFilesText(filesSpan, td1_2); });
-
-            if (savedDataId) {
-                writeGalleryFileListById(savedDataId, null, allFiles);
-            }
-            refreshShowFileListPanelIfOpen();
-
-            if (currentSettings.confirmBtnColorChange !== false) {
-                archiveStatusBtn.textContent = '✓';
-                archiveStatusBtn.style.backgroundColor = '#00AA00';
-                archiveStatusBtn.style.color = '#FFFFFF';
-                setTimeout(function() {
-                    archiveStatusBtn.textContent = '';
-                    archiveStatusBtn.style.backgroundColor = '#E0DED3';
-                    archiveStatusBtn.style.color = '#5C0D12';
-                }, confirmColorMs);
-            } else {
-                archiveStatusBtn.textContent = '✓';
-                setTimeout(function() {
-                    archiveStatusBtn.textContent = '';
-                }, 1000);
-            }
-        });
-        zipInput.value = '';
-    });
     zipBtn.addEventListener('click', function(e) {
         e.preventDefault();
-        zipInput.click();
+        archiveStatusBtn.textContent = '';
+        archiveStatusBtn.title = '';
+        archiveStatusBtn.style.backgroundColor = '#E0DED3';
+        archiveStatusBtn.style.color = '#5C0D12';
+
+        selectAuthorizedArchiveFilesWithPicker().then(function(selection) {
+            var files = selection.files || [];
+            if (!files.length) return;
+
+            flowLog('ZIP', '開始處理壓縮檔', files.map(function(file) {
+                return file.name;
+            }).join(', '));
+
+            var confirmColorMs = currentSettings.confirmBtnColorMs || 1000;
+
+            handleArchiveFiles(files, archiveStatusBtn, function(results) {
+                if (results.length === 0) return;
+                var allFiles = [];
+                var rootSources = [];
+                results.forEach(function(r) {
+                    var rootName = getArchiveSourceLabelFromResult(r);
+                    rootSources.push({ name: rootName, type: 'archive' });
+                    allFiles = allFiles.concat(createGallerySourcePrefixedFileEntries(r.files, rootName));
+                });
+                allFiles.sort(function(a, b) { return naturalCompare(a.path, b.path); });
+
+                if (allFiles.length > MAX_FILES) {
+                    warnLog('ZIP', '文件數超過限制，截斷', { limit: MAX_FILES, original: allFiles.length });
+                    allFiles = allFiles.slice(0, MAX_FILES);
+                }
+
+                opLog('解壓完成', { count: allFiles.length, source: 'ZIP' });
+                filesSpan.textContent = allFiles.length;
+                requestAnimationFrame(function() { alignFilesText(filesSpan, td1_2); });
+
+                if (savedDataId) {
+                    writeGalleryFileListById(
+                        savedDataId,
+                        null,
+                        allFiles,
+                        'archive',
+                        rootSources[0] ? rootSources[0].name : null,
+                        rootSources,
+                        null
+                    );
+                }
+                refreshShowFileListPanelIfOpen();
+
+                flashColoredSuccessState(archiveStatusBtn, '✓', '', confirmColorMs);
+            });
+        }).catch(function(err) {
+            if (err && err.name === 'AbortError') {
+                archiveStatusBtn.textContent = '';
+                archiveStatusBtn.title = '';
+                archiveStatusBtn.style.backgroundColor = '#E0DED3';
+                archiveStatusBtn.style.color = '#5C0D12';
+                return;
+            }
+
+            var displayMessage = getAuthorizedSelectionFailureDisplayMessage(err, '壓縮檔');
+            warnLog('ZIP', displayMessage, {
+                code: err && err.code,
+                message: err && (err.message || err)
+            });
+            archiveStatusBtn.textContent = '✕';
+            archiveStatusBtn.title = displayMessage;
+            archiveStatusBtn.style.backgroundColor = '#CC0000';
+            archiveStatusBtn.style.color = '#FFFFFF';
+            setTimeout(function() {
+                archiveStatusBtn.textContent = '';
+                archiveStatusBtn.title = '';
+                archiveStatusBtn.style.backgroundColor = '#E0DED3';
+                archiveStatusBtn.style.color = '#5C0D12';
+            }, 2000);
+        });
     });
     td2_2.appendChild(zipBtn);
-    td2_2.appendChild(zipInput);
 
     var folderScanBtn = document.createElement('button');
     folderScanBtn.textContent = '📁';
     folderScanBtn.style.cssText = 'background-color: #E0DED3; border: 1px solid #5C0D12; color: #5C0D12; font-weight: bold; font-size: 8pt; height: 18px; line-height: 16px; cursor: pointer; border-radius: 2px; display: block; box-sizing: border-box; padding: 0 4px; margin: 2px 0 0 0; white-space: nowrap; width: 26px;';
     folderScanBtn.addEventListener('click', function(e) {
         e.preventDefault();
-        if (!window.showDirectoryPicker) {
-            warnLog('Folder', 'showDirectoryPicker not supported');
-            return;
-        }
         flowLog('Folder', '開始掃描目錄');
-        archiveStatusBtn.textContent = '...';
+        archiveStatusBtn.textContent = '';
+        archiveStatusBtn.title = '';
         archiveStatusBtn.style.backgroundColor = '#E0DED3';
+        archiveStatusBtn.style.color = '#5C0D12';
 
-        window.showDirectoryPicker({ mode: 'read' }).then(function(dirHandle) {
+        selectAuthorizedDirectoryWithPicker().then(function(selection) {
+            var dirHandle = selection.handle;
+            var authorizedRootEntry = selection.authorizedRootEntry;
+            var relativeRootPath = buildAuthorizedRelativePathFromParts(selection.relativePathParts);
             var imageFiles = [];
             var skipped = 0;
             var fileCount = 0;
@@ -5255,12 +6659,30 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
                     imageFiles = imageFiles.slice(0, MAX_FILES);
                 }
 
-                opLog('掃描資料夾完成', { folderName: dirHandle.name, validFiles: imageFiles.length, skipped: skipped, total: fileCount });
+                var folderSourceLabel = relativeRootPath || dirHandle.name;
+                var rootSources = [{ name: folderSourceLabel, type: 'folder' }];
+                var prefixedImageFiles = createGallerySourcePrefixedFileEntries(imageFiles, relativeRootPath);
+
+                opLog('掃描資料夾完成', {
+                    folderName: folderSourceLabel,
+                    authorizedRootId: authorizedRootEntry ? authorizedRootEntry.id : null,
+                    validFiles: imageFiles.length,
+                    skipped: skipped,
+                    total: fileCount
+                });
                 filesSpan.textContent = imageFiles.length;
                 requestAnimationFrame(function() { alignFilesText(filesSpan, td1_2); });
 
                 if (savedDataId) {
-                    writeGalleryFileListById(savedDataId, dirHandle.name, imageFiles);
+                    writeGalleryFileListById(
+                        savedDataId,
+                        relativeRootPath || '',
+                        prefixedImageFiles,
+                        'folder',
+                        folderSourceLabel,
+                        rootSources,
+                        authorizedRootEntry ? authorizedRootEntry.id : null
+                    );
                 }
                 refreshShowFileListPanelIfOpen();
 
@@ -5280,20 +6702,22 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
                 }
             });
         }).catch(function(err) {
-            if (err.name !== 'AbortError') {
-                errorLog('Folder', 'Directory picker error', err);
-                archiveStatusBtn.textContent = '✕';
-                archiveStatusBtn.style.backgroundColor = '#CC0000';
-                archiveStatusBtn.style.color = '#FFFFFF';
-                setTimeout(function() {
-                    archiveStatusBtn.textContent = '';
-                    archiveStatusBtn.style.backgroundColor = '#E0DED3';
-                    archiveStatusBtn.style.color = '#5C0D12';
-                }, 2000);
-            } else {
+            if (err && err.name === 'AbortError') {
                 archiveStatusBtn.textContent = '';
                 archiveStatusBtn.style.backgroundColor = '#E0DED3';
+                archiveStatusBtn.style.color = '#5C0D12';
+                return;
             }
+
+            errorLog('Folder', 'Directory picker error', err);
+            archiveStatusBtn.textContent = '✕';
+            archiveStatusBtn.style.backgroundColor = '#CC0000';
+            archiveStatusBtn.style.color = '#FFFFFF';
+            setTimeout(function() {
+                archiveStatusBtn.textContent = '';
+                archiveStatusBtn.style.backgroundColor = '#E0DED3';
+                archiveStatusBtn.style.color = '#5C0D12';
+            }, 2000);
         });
     });
     td2_2.appendChild(folderScanBtn);
@@ -5425,27 +6849,11 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
     });
 
     langSelect.addEventListener('change', function() {
-        if (currentSettings.nonJapaneseDefaultTranslated && this.value !== '0') {
-            cbTranslated.checkbox.checked = true;
-            cbOfficialTextless.checkbox.checked = false;
-            cbRewrite.checkbox.checked = false;
-            mtlSpan.style.display = 'inline-flex';
-            if (currentSettings.translatedDefaultMTL) {
-                mtlOption.checkbox.checked = true;
-            }
-        }
-
-        if (this.value === '0' && currentSettings.japaneseDefaultOfficialTextless) {
-            cbOfficialTextless.checkbox.checked = true;
-            cbTranslated.checkbox.checked = false;
-            cbRewrite.checkbox.checked = false;
-            mtlSpan.style.display = 'none';
-            mtlOption.checkbox.checked = false;
-        }
+        handleGalleryLanguageControlChange(this);
     });
 
     var uploaderRow = document.createElement('div');
-    uploaderRow.style.cssText = 'display: flex; align-items: flex-start; gap: 6px; margin-top: 4px;';
+    uploaderRow.style.cssText = 'display: flex; align-items: flex-start; gap: 6px; margin-top: 4px; width: 100%; box-sizing: border-box; padding-right: 4px;';
 
     var uploaderBtn = document.createElement('button');
     uploaderBtn.textContent = 'Uploader Comment';
@@ -5482,45 +6890,10 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
     saveCommentBtn.style.cssText = 'background-color: #E0DED3; border: 1px solid #5C0D12; color: #5C0D12; font-weight: bold; font-size: 9pt; padding: 2px 8px; cursor: pointer; border-radius: 3px; white-space: nowrap; height: 24px; line-height: 20px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; flex-shrink: 0;';
     saveCommentBtn.addEventListener('click', function(e) {
         e.preventDefault();
-        var mtlCb = mtlSpan.querySelector('input[type="checkbox"]');
-        var galleryData = {
-            id: savedDataId || (Date.now() + '_' + inputTitle.value),
-            title1: inputTitle.value,
-            title2: inputTitle2.value,
-            files: td1_2.textContent,
-            category: categorySelect.value,
-            language: langSelect.value,
-            folder: folderSelect.value,
-            options: {
-                official: cbOfficialTextless.checkbox.checked,
-                translated: cbTranslated.checkbox.checked,
-                rewrite: cbRewrite.checkbox.checked,
-                digital: cbDigital.checkbox.checked,
-                decensored: cbDecensored.checkbox.checked,
-                aiGenerated: cbAIGenerated.checkbox.checked,
-                colorized: cbColorized.checkbox.checked,
-                incomplete: cbIncomplete.checkbox.checked,
-                ongoing: cbOngoing.checkbox.checked,
-                sample: cbSample.checkbox.checked,
-                anthology: cbAnthology.checkbox.checked,
-                textless: false
-            },
-            mtl: mtlCb ? mtlCb.checked : false,
-            comment: uploaderCommentTA.value,
-            timestamp: Date.now()
-        };
         try {
-            upsertSavedGallery(galleryData);
+            var galleryData = persistGalleryGroup(getGalleryGroupFields([tr1, tr2]));
             savedDataId = galleryData.id;
-            tr2.dataset.savedDataId = savedDataId;
-            saveCommentBtn.style.backgroundColor = '#999999';
-            saveCommentBtn.style.color = '#CCCCCC';
-            saveCommentBtn.style.borderColor = '#999999';
-            setTimeout(function() {
-                saveCommentBtn.style.backgroundColor = '#E0DED3';
-                saveCommentBtn.style.color = '#5C0D12';
-                saveCommentBtn.style.borderColor = '#5C0D12';
-            }, 500);
+            flashButtonSavedState(saveCommentBtn, '已儲存 ✓', 'save', 500);
             opLog('保存畫廊', { id: galleryData.id, title: galleryData.title1 || galleryData.title2 || '' });
             refreshShowFileListPanelIfOpen();
         } catch (error) {
@@ -5540,66 +6913,15 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
     plusBtn.addEventListener('click', function(e) {
         e.preventDefault();
         try {
-            var categoryMap = { 'Doujinshi': '2', 'Manga': '3', 'Artist CG': '4', 'Game CG': '5', 'Western': '10', 'Non-H': '9', 'Image Set': '6', 'Cosplay': '7', 'Misc': '1' };
-            var langTypeVal = '0';
-            if (cbTranslated.checkbox.checked) langTypeVal = '1';
-            else if (cbRewrite.checkbox.checked) langTypeVal = '2';
-            var mainVal = inputTitle.value;
-            var jpVal = inputTitle2.value;
-            if (mainVal && !jpVal) jpVal = mainVal;
-            else if (!mainVal && jpVal) mainVal = jpVal;
-
-            var pendingData = {
-                id: Date.now() + '_' + mainVal,
-                title1: mainVal,
-                title2: jpVal,
-                files: td1_2.textContent,
-                category: categoryMap[categorySelect.value] || '2',
-                categoryText: categorySelect.value,
-                language: langSelect.value,
-                folder: folderSelect.value,
-                langtype: langTypeVal,
-                mtl: mtlOption.checkbox.checked,
-                comment: uploaderCommentTA.value,
-                savedDataId: savedDataId,
-                options: {
-                    official: cbOfficialTextless.checkbox.checked,
-                    translated: cbTranslated.checkbox.checked,
-                    rewrite: cbRewrite.checkbox.checked,
-                    digital: cbDigital.checkbox.checked,
-                    decensored: cbDecensored.checkbox.checked,
-                    aiGenerated: cbAIGenerated.checkbox.checked,
-                    colorized: cbColorized.checkbox.checked,
-                    textless: false,
-                    incomplete: cbIncomplete.checkbox.checked,
-                    sample: cbSample.checkbox.checked,
-                    anthology: cbAnthology.checkbox.checked,
-                    ongoing: cbOngoing.checkbox.checked
-                }
-            };
+            var pendingData = buildPendingCreateDataFromFields(getGalleryGroupFields([tr1, tr2]));
             GM_setValue('pending_create', pendingData);
-            opLog('建立單一圖庫', { title: mainVal || jpVal || '', savedDataId: savedDataId || null });
+            opLog('建立單一圖庫', { title: pendingData.title1 || pendingData.title2 || '', savedDataId: pendingData.savedDataId || null });
             GM_openInTab('https://upload.e-hentai.org/managegallery?act=new', { active: false });
         } catch (err) {
             errorLog('CreateGallery', '+ 按鈕錯誤', err.message);
         }
     });
     td2_6.appendChild(plusBtn);
-
-    var deletePending = false;
-    var deleteTimer = null;
-
-    function resetDeleteConfirm() {
-        if (deletePending) {
-            deletePending = false;
-            deleteBtn.style.backgroundColor = '#E0DED3';
-            deleteBtn.style.color = '#5C0D12';
-        }
-        if (deleteTimer) {
-            clearTimeout(deleteTimer);
-            deleteTimer = null;
-        }
-    }
 
     var deleteBtn = document.createElement('button');
     deleteBtn.textContent = '-';
@@ -5608,37 +6930,12 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
         e.preventDefault();
         e.stopPropagation();
 
-        function performDelete() {
-            [tr1, tr2].forEach(function(row) { row.remove(); });
-            waitingCreateCountRef.value--;
-            var fs1 = folderRow1.querySelector('strong');
-            if (fs1) fs1.textContent = Math.max(0, waitingCreateCountRef.value);
-            if (savedDataId) {
-                try {
-                    removeSavedGalleryById(savedDataId);
-                    deleteGalleryFileListById(savedDataId);
-                } catch (err) {}
-            }
+        triggerDeleteBySettings(deleteBtn, function() {
+            var removed = deleteGalleryGroupByFields(getGalleryGroupFields([tr1, tr2]), folderRow1, waitingCreateCountRef);
+            if (!removed) return;
             refreshShowFileListPanelIfOpen();
             opLog('刪除等待建立項目', { id: savedDataId || null, title: inputTitle.value || inputTitle2.value || '' });
-        }
-
-        if (!currentSettings.deleteDoubleConfirm) {
-            performDelete();
-            return;
-        }
-
-        if (!deletePending) {
-            deletePending = true;
-            deleteBtn.style.backgroundColor = '#FF0000';
-            deleteBtn.style.color = '#FFFFFF';
-            deleteTimer = setTimeout(function() {
-                resetDeleteConfirm();
-            }, currentSettings.doubleConfirmMs || 1000);
-        } else {
-            resetDeleteConfirm();
-            performDelete();
-        }
+        });
     });
     td2_6.appendChild(deleteBtn);
 
@@ -5998,6 +7295,28 @@ function createDictManagerPanel() {
     var localDictSelect = document.createElement('select');
     applyTopBarControlStyle(localDictSelect, '150px', 'min-width: 150px;color: #5C0D12;');
 
+    var priorityPadLabel = document.createElement('span');
+    priorityPadLabel.textContent = '優先度固定補零長度:';
+    priorityPadLabel.style.cssText = 'font-size: 9pt; color: #5C0D12; white-space: nowrap; display: none;';
+
+    var priorityPadInput = document.createElement('input');
+    priorityPadInput.type = 'text';
+    priorityPadInput.value = String(getDictPriorityPadLengthSafe());
+    applyTopBarControlStyle(priorityPadInput, '48px', 'text-align: center;color: #333;display: none;');
+
+    function applyPriorityPadLengthFromInput() {
+        var raw = String(priorityPadInput.value || '').trim();
+        var parsed = /^[1-9]\d*$/.test(raw) ? parseInt(raw, 10) : 5;
+        parsed = saveDictPriorityPadLengthSetting(parsed);
+        priorityPadInput.value = String(parsed);
+        if (currentSelection.type === 'local' && currentSelection.key) {
+            renderLocalDictPanel(currentSelection.key, currentSelection.key);
+        }
+    }
+
+    priorityPadInput.addEventListener('change', applyPriorityPadLengthFromInput);
+    priorityPadInput.addEventListener('blur', applyPriorityPadLengthFromInput);
+
     var topKeyInput = document.createElement('input');
     topKeyInput.type = 'text';
     topKeyInput.placeholder = '原文';
@@ -6017,6 +7336,8 @@ function createDictManagerPanel() {
     applyPageToneBtnStyle(updateDictBtn, 'height: 26px;min-width: 88px;padding: 0 10px;background: #E0DED3;color: #5C0D12;border: 1px solid #5C0D12;');
 
     titleRight.appendChild(localDictSelect);
+    titleRight.appendChild(priorityPadLabel);
+    titleRight.appendChild(priorityPadInput);
     titleRight.appendChild(topKeyInput);
     titleRight.appendChild(topValInput);
     titleRight.appendChild(topSaveBtn);
@@ -6081,6 +7402,197 @@ function createDictManagerPanel() {
         if (size >= 1024 * 1024) return (size / (1024 * 1024)).toFixed(2) + ' MB';
         if (size >= 1024) return (size / 1024).toFixed(2) + ' KB';
         return size + ' B';
+    }
+
+    function getDictPriorityPadLengthSafe() {
+        var settings = getCurrentSettingsSafe();
+        var value = parseInt(settings && settings.dictPriorityPadLength, 10);
+        if (!isFinite(value) || value < 1) value = 5;
+        return value;
+    }
+
+    function saveDictPriorityPadLengthSetting(value) {
+        value = parseInt(String(value || '').trim(), 10);
+        if (!isFinite(value) || value < 1) value = 5;
+        var settings = Object.assign({}, getCurrentSettingsSafe(), {
+            dictPriorityPadLength: value
+        });
+        saveSettings(settings);
+        return value;
+    }
+
+    function formatPriorityDisplay(priority) {
+        priority = parseInt(priority, 10);
+        if (!isFinite(priority) || priority < 1) priority = 1;
+        return String(priority).padStart(getDictPriorityPadLengthSafe(), '0');
+    }
+
+    function moveRowToPriorityPosition(rows, row, priority) {
+        var fromIndex = rows.indexOf(row);
+        if (fromIndex < 0) return;
+
+        priority = parseInt(String(priority || '').trim(), 10);
+        if (!isFinite(priority) || priority < 1) priority = 1;
+        if (priority > rows.length) priority = rows.length;
+
+        var targetIndex = priority - 1;
+        if (targetIndex === fromIndex) return;
+
+        rows.splice(fromIndex, 1);
+        rows.splice(targetIndex, 0, row);
+    }
+
+    function rebuildLocalDictObjectFromRows(rows, includeAllEdits) {
+        var rebuilt = {};
+        rows.forEach(function(row) {
+            var useEdit = !!(row && row.editing && (includeAllEdits || row.checked));
+            var nextKey = String((useEdit ? row.editKey : row.key) || '').trim();
+            var nextVal = String((useEdit ? row.editVal : row.val) || '');
+            if (!nextKey) return;
+
+            rebuilt[nextKey] = nextVal;
+            row.key = nextKey;
+            row.val = nextVal;
+            row.editKey = nextKey;
+            row.editVal = nextVal;
+            if (useEdit) row.editing = false;
+            row.checked = false;
+        });
+        return rebuilt;
+    }
+
+    function saveAllLocalDictRows(dictKey, rows) {
+        var dicts = getUserDictsRaw();
+        dicts[dictKey] = rebuildLocalDictObjectFromRows(rows, true);
+        setUserDictsRaw(dicts);
+        localDictCache[dictKey] = null;
+    }
+
+    function showPriorityEditModal(rows, row, onDone) {
+        if (modalOverlay) modalOverlay.remove();
+
+        modalOverlay = document.createElement('div');
+        modalOverlay.style.cssText = 'position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 999999; display: flex; align-items: center; justify-content: center;';
+
+        var modal = document.createElement('div');
+        modal.style.cssText = 'width: 360px; max-width: calc(100vw - 24px); background: #E0DED3; border: 1px solid #5C0D12; border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,0.25); padding: 12px; box-sizing: border-box;';
+
+        var titleEl = document.createElement('div');
+        titleEl.textContent = '修改優先度';
+        titleEl.style.cssText = 'font-weight: bold; font-size: 10pt; color: #5C0D12; margin-bottom: 8px;';
+
+        var input = document.createElement('input');
+        input.type = 'text';
+        input.value = String(rows.indexOf(row) + 1);
+        input.placeholder = '請輸入正整數';
+        input.style.cssText = 'width: 100%; height: 26px; border: 1px solid #5C0D12; border-radius: 3px; background: #FAFAFA; color: #333; font-size: 9pt; padding: 0 8px; box-sizing: border-box; outline: none;';
+
+        var hint = document.createElement('div');
+        hint.textContent = 'Enter 確認，Esc 取消';
+        hint.style.cssText = 'font-size: 8.5pt; color: #555; margin-top: 6px;';
+
+        var btnRow = document.createElement('div');
+        btnRow.style.cssText = 'display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px;';
+
+        var cancelBtn = document.createElement('button');
+        cancelBtn.textContent = '取消';
+        applyPageToneBtnStyle(cancelBtn, 'height: 24px;min-width: 64px;background: #FAFAFA;');
+
+        var okBtn = document.createElement('button');
+        okBtn.textContent = '修改';
+        applyPrimaryDarkBtnStyle(okBtn, 'height: 24px;min-width: 64px;');
+
+        function closeModal() {
+            document.removeEventListener('keydown', onKeyDown, true);
+            if (modalOverlay) modalOverlay.remove();
+            modalOverlay = null;
+        }
+
+        function showInvalidState() {
+            var delayMs = getCurrentSettingsSafe().confirmBtnColorMs || 1000;
+            okBtn.style.backgroundColor = '#CC0000';
+            okBtn.style.borderColor = '#CC0000';
+            okBtn.style.color = '#FFFFFF';
+            setTimeout(function() {
+                okBtn.style.backgroundColor = '#5C0D12';
+                okBtn.style.borderColor = '#5C0D12';
+                okBtn.style.color = '#FFFFFF';
+            }, delayMs);
+        }
+
+        function submit() {
+            var raw = String(input.value || '').trim();
+            if (!/^[1-9]\d*$/.test(raw)) {
+                showInvalidState();
+                input.focus();
+                input.select();
+                return;
+            }
+
+            moveRowToPriorityPosition(rows, row, parseInt(raw, 10));
+            closeModal();
+            if (typeof onDone === 'function') onDone();
+        }
+
+        function onKeyDown(e) {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                closeModal();
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                submit();
+            }
+        }
+
+        cancelBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            closeModal();
+        });
+
+        okBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            submit();
+        });
+
+        modalOverlay.addEventListener('click', function(e) {
+            if (e.target === modalOverlay) closeModal();
+        });
+
+        btnRow.appendChild(cancelBtn);
+        btnRow.appendChild(okBtn);
+        modal.appendChild(titleEl);
+        modal.appendChild(input);
+        modal.appendChild(hint);
+        modal.appendChild(btnRow);
+        modalOverlay.appendChild(modal);
+        document.body.appendChild(modalOverlay);
+
+        document.addEventListener('keydown', onKeyDown, true);
+        setTimeout(function() {
+            input.focus();
+            input.select();
+        }, 0);
+    }
+
+    if (typeof _emitBrowserConsole === 'function' && !_emitBrowserConsole.__debugFilterWrapped) {
+    var _emitBrowserConsole__originalForDebugFilter = _emitBrowserConsole;
+    var _emitBrowserConsole__wrappedForDebugFilter = function(level, args) {
+        if (!_shouldEmitBrowserConsoleMessage(level, args)) return;
+        return _emitBrowserConsole__originalForDebugFilter.apply(this, arguments);
+    };
+    _emitBrowserConsole__wrappedForDebugFilter.__debugFilterWrapped = true;
+    _emitBrowserConsole = _emitBrowserConsole__wrappedForDebugFilter;
+}
+function createPriorityBadgeElement(rows, row, onDone) {
+        var badge = document.createElement('button');
+        badge.type = 'button';
+        badge.textContent = formatPriorityDisplay(rows.indexOf(row) + 1);
+        applyPageToneBtnStyle(badge, 'width: 52px;height: 22px;padding: 0 4px;flex-shrink: 0;font-family: monospace;font-size: 8.5pt;margin-left: 1px;margin-right: 3px;');
+        badge.addEventListener('click', function(e) {
+            e.preventDefault();
+            showPriorityEditModal(rows, row, onDone);
+        });
+        return badge;
     }
 
     function getLocalDictKeys() {
@@ -6316,16 +7828,7 @@ function createDictManagerPanel() {
         var duplicateInfo = findLocalDictionaryDuplicateLoose(dictKey, keyText, null);
         if (duplicateInfo) {
             var dupeDelayMs = currentSettings.confirmBtnColorMs || 1000;
-            topSaveBtn.textContent = 'Dupe';
-            topSaveBtn.style.backgroundColor = '#CC0000';
-            topSaveBtn.style.color = '#FFFFFF';
-            topSaveBtn.style.borderColor = '#CC0000';
-            setTimeout(function() {
-                topSaveBtn.textContent = 'Save';
-                topSaveBtn.style.backgroundColor = '#E0DED3';
-                topSaveBtn.style.color = '#5C0D12';
-                topSaveBtn.style.borderColor = '#5C0D12';
-            }, dupeDelayMs);
+            flashColoredErrorState(topSaveBtn, 'Fail', 'Save', dupeDelayMs);
             return;
         }
 
@@ -6334,7 +7837,19 @@ function createDictManagerPanel() {
         var exists = Object.prototype.hasOwnProperty.call(dicts[dictKey], keyText);
 
         function doSave() {
-            dicts[dictKey][keyText] = valText;
+            var reorderedDict = {};
+            reorderedDict[keyText] = valText;
+            Object.keys(dicts[dictKey]).forEach(function(existingKey) {
+                if (existingKey === keyText) return;
+                reorderedDict[existingKey] = dicts[dictKey][existingKey];
+            });
+            var reorderedBottomDict = {};
+            Object.keys(reorderedDict).forEach(function(existingKey) {
+                if (existingKey === keyText) return;
+                reorderedBottomDict[existingKey] = reorderedDict[existingKey];
+            });
+            reorderedBottomDict[keyText] = reorderedDict[keyText];
+            dicts[dictKey] = reorderedBottomDict;
             setUserDictsRaw(dicts);
             localDictCache[dictKey] = null;
             delete editingRowsStateMap['rows_' + dictKey];
@@ -6478,7 +7993,10 @@ function createDictManagerPanel() {
         rebuildLocalDictionaryFromRowsLoose(dictKey, rows);
         localDictCache[dictKey] = null;
         return;
-        var current = dicts[dictKey] || {};
+        dicts[dictKey] = rebuildLocalDictObjectFromRows(rows, false);
+        setUserDictsRaw(dicts);
+        localDictCache[dictKey] = null;
+        return;
 
         rows.forEach(function(row) {
             if (!row.checked) return;
@@ -6534,6 +8052,45 @@ function createDictManagerPanel() {
         if (onDone) onDone();
     }
 
+    function copyTextToClipboardLoose(text, btn) {
+        text = String(text || '');
+        var done = function() {
+            if (!btn) return;
+            var oldText = btn.textContent;
+            btn.textContent = '✓';
+            setTimeout(function() {
+                btn.textContent = oldText;
+            }, 1000);
+        };
+
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done).catch(function() {
+                var ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.left = '-9999px';
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                try { document.execCommand('copy'); } catch (e) {}
+                document.body.removeChild(ta);
+                done();
+            });
+            return;
+        }
+
+        var textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        try { document.execCommand('copy'); } catch (e2) {}
+        document.body.removeChild(textarea);
+        done();
+    }
+
     function renderLocalDictPanel(dictKey, dictLabel) {
         currentLocalDict = dictKey;
         clearRightCol();
@@ -6573,10 +8130,15 @@ function createDictManagerPanel() {
         saveBtn.textContent = 'Save';
         applyPrimaryDarkBtnStyle(saveBtn, 'height: 24px;min-width: 64px;padding: 0 16px;');
 
+        var allSaveBtn = document.createElement('button');
+        allSaveBtn.textContent = 'All Save';
+        applyPrimaryDarkBtnStyle(allSaveBtn, 'height: 24px;min-width: 64px;padding: 0 16px;');
+
         leftActionWrap.appendChild(selectAllBtn);
         leftActionWrap.appendChild(deselectAllBtn);
         rightActionWrap.appendChild(deleteBtn);
         rightActionWrap.appendChild(saveBtn);
+        rightActionWrap.appendChild(allSaveBtn);
         rightBottomRow.appendChild(leftActionWrap);
         rightBottomRow.appendChild(rightActionWrap);
 
@@ -6599,18 +8161,33 @@ function createDictManagerPanel() {
             });
         }
 
-        function validateSaveRows() {
-            validateSaveRows.lastDuplicateInfo = null;
-            var duplicateInfo = validateLocalDictionaryRowsAgainstDuplicatesLoose(dictKey, rows);
+        function flashDictManagerSaveFail(btn, restoreText) {
+            var failDelayMs = _getConfirmFeedbackSettingsSafe().delayMs;
+            flashColoredErrorState(btn, 'Fail', restoreText, failDelayMs);
+        }
+
+        function validateRowsBeforeSave(includeAllEdits) {
+            validateRowsBeforeSave.lastDuplicateInfo = null;
+
+            var rowsForDuplicateCheck = rows.map(function(row) {
+                return {
+                    key: row.key,
+                    editKey: row.editKey,
+                    editing: row.editing,
+                    checked: includeAllEdits ? true : row.checked
+                };
+            });
+
+            var duplicateInfo = validateLocalDictionaryRowsAgainstDuplicatesLoose(dictKey, rowsForDuplicateCheck);
             if (duplicateInfo) {
-                validateSaveRows.lastDuplicateInfo = duplicateInfo;
+                validateRowsBeforeSave.lastDuplicateInfo = duplicateInfo;
                 return false;
             }
 
             var newKeys = {};
             for (var i = 0; i < rows.length; i++) {
                 var row = rows[i];
-                if (!(row.editing && row.checked)) continue;
+                if (!(row.editing && (includeAllEdits || row.checked))) continue;
                 var k = String(row.editKey || '').trim();
                 if (!k) {
                     alert('存在空白鍵名，請修正後再保存');
@@ -6629,25 +8206,25 @@ function createDictManagerPanel() {
             while (rightListDiv.firstChild) rightListDiv.removeChild(rightListDiv.firstChild);
             rows.forEach(function(row) {
                 var rowDiv = document.createElement('div');
-                rowDiv.style.cssText = 'display: flex; align-items: center; border-bottom: 1px solid rgba(92,13,18,0.15); background: #EDE9DF; padding: 1px 0;';
+                rowDiv.style.cssText = 'display: flex; align-items: center; border-bottom: 1px solid rgba(92,13,18,0.15); background: #EDE9DF; padding: 1px 0; min-height: 23px;';
 
                 if (row.editing) {
                     var cbEdit = document.createElement('input');
                     cbEdit.type = 'checkbox';
                     cbEdit.checked = !!row.checked;
-                    cbEdit.style.cssText = 'width: 18px; height: 22px; flex-shrink: 0; margin: 0 4px; padding: 0; accent-color: #5C0D12; vertical-align: middle;';
+                    cbEdit.style.cssText = 'width: 18px; height: 18px; flex-shrink: 0; margin: 0 4px; padding: 0; accent-color: #5C0D12; align-self: center; display: block; position: relative; top: 0;';
                     cbEdit.addEventListener('change', function() { row.checked = cbEdit.checked; });
 
                     var keyInput = document.createElement('input');
                     keyInput.type = 'text';
                     keyInput.value = row.editKey;
-                    keyInput.style.cssText = 'flex: 1; min-width: 0; border: 1px solid #5C0D12; border-radius: 3px; background: #FAFAFA; margin: 0 4px; font-size: 9pt; padding: 2px 4px; height: 22px; box-sizing: border-box; outline: none;';
+                    keyInput.style.cssText = 'flex: 1; min-width: 0; border: 1px solid #5C0D12; border-radius: 3px; background: #FAFAFA; margin: 0.5px 4px; font-size: 9pt; padding: 0 4px; height: 22px; line-height: 22px; box-sizing: border-box; outline: none; align-self: center;';
                     keyInput.addEventListener('input', function() { row.editKey = keyInput.value; });
 
                     var valInput = document.createElement('input');
                     valInput.type = 'text';
                     valInput.value = row.editVal;
-                    valInput.style.cssText = 'flex: 1; min-width: 0; border: 1px solid #5C0D12; border-radius: 3px; background: #FAFAFA; margin: 0 4px; font-size: 9pt; padding: 2px 4px; height: 22px; box-sizing: border-box; outline: none;';
+                    valInput.style.cssText = 'flex: 1; min-width: 0; border: 1px solid #5C0D12; border-radius: 3px; background: #FAFAFA; margin: 0.5px 4px; font-size: 9pt; padding: 0 4px; height: 22px; line-height: 22px; box-sizing: border-box; outline: none; align-self: center;';
                     valInput.addEventListener('input', function() { row.editVal = valInput.value; });
 
                     var cancelBtn = document.createElement('button');
@@ -6662,6 +8239,8 @@ function createDictManagerPanel() {
                         renderRows();
                     });
 
+                    var editPriorityBadge = createPriorityBadgeElement(rows, row, renderRows);
+                    rowDiv.appendChild(editPriorityBadge);
                     rowDiv.appendChild(cbEdit);
                     rowDiv.appendChild(keyInput);
                     rowDiv.appendChild(valInput);
@@ -6708,12 +8287,12 @@ function createDictManagerPanel() {
                     var cb = document.createElement('input');
                     cb.type = 'checkbox';
                     cb.checked = !!row.checked;
-                    cb.style.cssText = 'width: 18px; height: 22px; flex-shrink: 0; margin: 0 4px; padding: 0; accent-color: #5C0D12; vertical-align: middle;';
+                    cb.style.cssText = 'width: 18px; height: 18px; flex-shrink: 0; margin: 0 4px; padding: 0; accent-color: #5C0D12; align-self: center; display: block; position: relative; top: 0;';
                     cb.addEventListener('change', function() { row.checked = cb.checked; });
 
                     var keySpan = document.createElement('span');
                     keySpan.textContent = row.key;
-                    keySpan.style.cssText = 'flex: 1; min-width: 0; font-size: 9pt; padding: 2px 4px; border-right: 1px solid rgba(92,13,18,0.15); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 18px; cursor: pointer;';
+                    keySpan.style.cssText = 'flex: 1; min-width: 0; font-size: 9pt; padding: 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; height: 23px; line-height: 23px; cursor: pointer; display: block;';
                     keySpan.addEventListener('click', function(e) {
                         e.preventDefault();
                         row.checked = !row.checked;
@@ -6722,7 +8301,7 @@ function createDictManagerPanel() {
 
                     var valSpan = document.createElement('span');
                     valSpan.textContent = row.val;
-                    valSpan.style.cssText = 'flex: 1; min-width: 0; font-size: 9pt; padding: 2px 4px; border-right: 1px solid rgba(92,13,18,0.15); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 18px; cursor: pointer;';
+                    valSpan.style.cssText = 'flex: 1; min-width: 0; font-size: 9pt; padding: 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; height: 23px; line-height: 23px; cursor: pointer; display: block;';
                     valSpan.addEventListener('click', function(e) {
                         e.preventDefault();
                         row.checked = !row.checked;
@@ -6741,9 +8320,31 @@ function createDictManagerPanel() {
                         renderRows();
                     });
 
+                    var viewPriorityBadge = createPriorityBadgeElement(rows, row, renderRows);
+                    rowDiv.appendChild(viewPriorityBadge);
                     rowDiv.appendChild(cb);
                     rowDiv.appendChild(keySpan);
+
+                    var keyCopyBtn = document.createElement('button');
+                    keyCopyBtn.textContent = 'COPY';
+                    applyPageToneBtnStyle(keyCopyBtn, 'height: 22px;min-width: 42px;padding: 0 6px;margin-right: 4px;flex-shrink: 0;');
+                    keyCopyBtn.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        copyTextToClipboardLoose(row.key, keyCopyBtn);
+                    });
+                    rowDiv.appendChild(keyCopyBtn);
                     rowDiv.appendChild(valSpan);
+
+                    var valCopyBtn = document.createElement('button');
+                    valCopyBtn.textContent = 'COPY';
+                    applyPageToneBtnStyle(valCopyBtn, 'height: 22px;min-width: 42px;padding: 0 6px;margin-right: 4px;flex-shrink: 0;');
+                    valCopyBtn.addEventListener('click', function(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        copyTextToClipboardLoose(row.val, valCopyBtn);
+                    });
+                    rowDiv.appendChild(valCopyBtn);
                     rowDiv.appendChild(editBtn);
 
                     var viewMoveUpBtn = document.createElement('button');
@@ -6785,6 +8386,10 @@ function createDictManagerPanel() {
                     rowDiv.appendChild(viewMoveDownBtn);
                 }
 
+                Array.from(rowDiv.querySelectorAll('button')).forEach(function(btn) {
+                    btn.style.marginTop = '1px';
+                    btn.style.marginBottom = '1px';
+                });
                 rightListDiv.appendChild(rowDiv);
             });
         }
@@ -6801,9 +8406,44 @@ function createDictManagerPanel() {
             renderRows();
         });
 
+        var deleteConfirmPending = false;
+        var deleteConfirmTimer = null;
+        var deleteConfirmFeedbackController = null;
+
+        function resetLocalDictDeleteConfirmState() {
+            deleteConfirmPending = false;
+            if (deleteConfirmTimer) {
+                clearTimeout(deleteConfirmTimer);
+                deleteConfirmTimer = null;
+            }
+            if (deleteConfirmFeedbackController && typeof deleteConfirmFeedbackController.restore === 'function') {
+                deleteConfirmFeedbackController.restore();
+                deleteConfirmFeedbackController = null;
+            }
+        }
+
         deleteBtn.addEventListener('click', function(e) {
             e.preventDefault();
             var hadChecked = rows.some(function(row) { return row.checked; });
+            if (!hadChecked) {
+                resetLocalDictDeleteConfirmState();
+                return;
+            }
+
+            if (getCurrentSettingsSafe().deleteDoubleConfirm) {
+                if (!deleteConfirmPending) {
+                    deleteConfirmPending = true;
+                    deleteConfirmFeedbackController = _beginFeedbackState(deleteBtn, {
+                        useColor: true,
+                        colorType: 'error'
+                    });
+                    deleteConfirmTimer = setTimeout(function() {
+                        resetLocalDictDeleteConfirmState();
+                    }, getCurrentSettingsSafe().doubleConfirmMs || 1000);
+                    return;
+                }
+                resetLocalDictDeleteConfirmState();
+            }
             if (!hadChecked) return;
             deleteCheckedRows(dictKey, rows, function() {
                 rows = rows.filter(function(row) { return !row.checked; });
@@ -6812,46 +8452,58 @@ function createDictManagerPanel() {
             });
         });
 
-        saveBtn.addEventListener('click', function(e) {
+        allSaveBtn.addEventListener('click', function(e) {
             e.preventDefault();
-            if (!validateSaveRows()) {
-                if (validateSaveRows.lastDuplicateInfo) {
-                    var dupeDelayMs = currentSettings.confirmBtnColorMs || 1000;
-                    saveBtn.textContent = 'Dupe';
-                    saveBtn.style.backgroundColor = '#CC0000';
-                    saveBtn.style.color = '#FFFFFF';
-                    saveBtn.style.borderColor = '#CC0000';
-                    setTimeout(function() {
-                        saveBtn.textContent = 'Save';
-                        saveBtn.style.backgroundColor = '#5C0D12';
-                        saveBtn.style.color = '#FFFFFF';
-                        saveBtn.style.borderColor = '#5C0D12';
-                    }, dupeDelayMs);
-                }
+            if (!validateRowsBeforeSave(true)) {
+                flashDictManagerSaveFail(allSaveBtn, 'All Save');
                 return;
             }
 
-            var changedItems = [];
-            rows.forEach(function(row) {
-                if (row.editing && row.checked) {
-                    changedItems.push({
-                        oldKey: row.key,
-                        newKey: row.editKey,
-                        newValue: row.editVal
-                    });
-                    row.key = row.editKey;
-                    row.val = row.editVal;
-                    row.editing = false;
-                }
-            });
-
-            saveLocalDict(dictKey, rows);
-            normalizeRowsForCache();
-            if (changedItems.length > 0) {
-                opLog('保存已編輯詞條', { dictType: dictKey, items: changedItems });
+            try {
+                saveAllLocalDictRows(dictKey, rows);
+                normalizeRowsForCache();
+                opLog('All Save 本地字典', { dictType: dictKey, count: rows.length });
+                renderRows();
+                flashButtonSavedState(allSaveBtn, '已儲存 ✓', 'All Save', 1000);
+            } catch (err) {
+                errorLog('DictManager', 'All Save 失敗', err);
+                flashDictManagerSaveFail(allSaveBtn, 'All Save');
             }
-            flashButtonSavedState(saveBtn, '已儲存 ✓', 'Save', 1500);
-            renderLocalDictPanel(dictKey, dictLabel);
+        });
+
+        saveBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            if (!validateRowsBeforeSave(false)) {
+                flashDictManagerSaveFail(saveBtn, 'Save');
+                return;
+            }
+
+            try {
+                var changedItems = [];
+                rows.forEach(function(row) {
+                    if (row.editing && row.checked) {
+                        changedItems.push({
+                            oldKey: row.key,
+                            newKey: row.editKey,
+                            newValue: row.editVal
+                        });
+                        row.key = row.editKey;
+                        row.val = row.editVal;
+                        row.editing = false;
+                    }
+                });
+
+                saveLocalDict(dictKey, rows);
+                normalizeRowsForCache();
+                if (changedItems.length > 0) {
+                    opLog('保存已編輯詞條', { dictType: dictKey, items: changedItems });
+                }
+                renderRows();
+                flashButtonSavedState(saveBtn, '已儲存 ✓', 'Save', 1000);
+            } catch (err) {
+                errorLog('DictManager', 'Save 失敗', err);
+                flashDictManagerSaveFail(saveBtn, 'Save');
+            }
         });
 
         renderRows();
@@ -7379,6 +9031,12 @@ function createDictManagerPanel() {
     leftCol.appendChild(navList);
     leftCol.appendChild(leftBottomBar);
 
+    container.refreshPanel = function() {
+        refreshLocalDictSelect();
+        renderNav();
+        renderCurrentSelectionSilently();
+    };
+
     _dictManagerUpdateFn = updateAllDicts;
     _dictManagerRefreshFns.kuromoji = function() {
         renderKuromojiItems();
@@ -7673,6 +9331,7 @@ function createShowFileListPanel() {
     var actionSelect = document.createElement('select');
     applySelectStyle(actionSelect, '70px');
     actionSelect.style.flexShrink = '0';
+    var saveOpt = document.createElement('option'); saveOpt.value = 'save'; saveOpt.textContent = 'Save'; actionSelect.appendChild(saveOpt);
     var delOpt = document.createElement('option'); delOpt.value = 'delete'; delOpt.textContent = 'Delete'; actionSelect.appendChild(delOpt);
     topRow.appendChild(actionSelect);
 
@@ -7680,26 +9339,41 @@ function createShowFileListPanel() {
     actionGoBtn.textContent = 'GO';
     applyPageToneBtnStyle(actionGoBtn, 'padding: 0 8px;height: 20px;line-height: 18px;flex-shrink: 0;');
     topRow.appendChild(actionGoBtn);
+
+    var fileListAllSaveBtn = document.createElement('button');
+    fileListAllSaveBtn.textContent = 'All Save';
+    applyPrimaryDarkBtnStyle(fileListAllSaveBtn, 'padding: 0 16px;height: 20px;line-height: 18px;flex-shrink: 0;');
+
+
     container.appendChild(topRow);
 
     var tabRow = document.createElement('div');
     tabRow.style.cssText = 'display: flex; gap: 0; margin-bottom: 8px; border-bottom: 1px solid #5C0D12;';
 
     var fileListTab = document.createElement('button');
+    fileListTab.type = 'button';
     fileListTab.textContent = 'Show File List';
     fileListTab.style.cssText = 'background-color: #5C0D12; color: #FFFFFF; border: 1px solid #5C0D12; border-bottom: none; font-size: 9pt; font-weight: bold; padding: 3px 12px; cursor: pointer; border-radius: 3px 3px 0 0;';
 
     var folderManagerTab = document.createElement('button');
+    folderManagerTab.type = 'button';
     folderManagerTab.textContent = 'Folder Manager';
     folderManagerTab.style.cssText = 'background-color: #E3E0D1; color: #5C0D12; border: 1px solid #5C0D12; border-bottom: none; font-size: 9pt; font-weight: bold; padding: 3px 12px; cursor: pointer; border-radius: 3px 3px 0 0; margin-left: 4px;';
 
     var fileRenamerTab = document.createElement('button');
+    fileRenamerTab.type = 'button';
     fileRenamerTab.textContent = 'File Renamer';
     fileRenamerTab.style.cssText = 'background-color: #E3E0D1; color: #5C0D12; border: 1px solid #5C0D12; border-bottom: none; font-size: 9pt; font-weight: bold; padding: 3px 12px; cursor: pointer; border-radius: 3px 3px 0 0; margin-left: 4px;';
+
+    var importExportTab = document.createElement('button');
+    importExportTab.type = 'button';
+    importExportTab.textContent = 'Import/Export';
+    importExportTab.style.cssText = 'background-color: #E3E0D1; color: #5C0D12; border: 1px solid #5C0D12; border-bottom: none; font-size: 9pt; font-weight: bold; padding: 3px 12px; cursor: pointer; border-radius: 3px 3px 0 0; margin-left: 4px;';
 
     tabRow.appendChild(fileListTab);
     tabRow.appendChild(folderManagerTab);
     tabRow.appendChild(fileRenamerTab);
+    tabRow.appendChild(importExportTab);
     container.appendChild(tabRow);
 
     var fileListPanel = document.createElement('div');
@@ -7720,24 +9394,23 @@ function createShowFileListPanel() {
     var deselectAllBtn = document.createElement('button');
     deselectAllBtn.textContent = '取消全選';
     applyPageToneBtnStyle(deselectAllBtn, 'padding: 2px 10px;height: 22px;');
+    var fileListRestoreBtn = document.createElement('button');
+    fileListRestoreBtn.textContent = 'Restore';
+    applyPageToneBtnStyle(fileListRestoreBtn, 'padding: 2px 10px;height: 22px;');
     fileListTopRow.appendChild(sortAscBtn);
     fileListTopRow.appendChild(sortDescBtn);
     fileListTopRow.appendChild(fileListSpacer);
     fileListTopRow.appendChild(selectAllBtn);
     fileListTopRow.appendChild(deselectAllBtn);
+    fileListTopRow.appendChild(fileListRestoreBtn);
+    fileListTopRow.appendChild(fileListAllSaveBtn);
     fileListPanel.appendChild(fileListTopRow);
 
     var listContainer = document.createElement('div');
     listContainer.style.cssText = 'border: 1px solid #5C0D12; background-color: rgb(227,224,209); min-height: 120px; max-height: 400px; overflow-y: auto;';
     fileListPanel.appendChild(listContainer);
 
-    var fileListBottomRow = document.createElement('div');
-    fileListBottomRow.style.cssText = 'display: flex; justify-content: flex-end; margin-top: 8px;';
-    var saveOrderBtn = document.createElement('button');
-    saveOrderBtn.textContent = 'Save Order';
-    applyPrimaryDarkBtnStyle(saveOrderBtn, 'padding: 4px 16px;border: none;');
-    fileListBottomRow.appendChild(saveOrderBtn);
-    fileListPanel.appendChild(fileListBottomRow);
+
     container.appendChild(fileListPanel);
 
     var folderManagerPanel = document.createElement('div');
@@ -7759,79 +9432,845 @@ function createShowFileListPanel() {
     var fileRenamerPanel = document.createElement('div');
     fileRenamerPanel.style.cssText = 'display: none;';
 
-    var renamerControlsDiv = document.createElement('div');
-    renamerControlsDiv.style.cssText = 'background-color: rgb(227,224,209); border: 1px solid #5C0D12; padding: 8px; margin-bottom: 6px;';
+    var renamerTopRow = document.createElement('div');
+    renamerTopRow.style.cssText = 'display: flex; align-items: center; gap: 6px; margin-bottom: 6px;';
+    var renamerSortAscBtn = document.createElement('button');
+    renamerSortAscBtn.textContent = '升序 ↑';
+    applyPageToneBtnStyle(renamerSortAscBtn, 'padding: 2px 10px;height: 22px;');
+    var renamerSortDescBtn = document.createElement('button');
+    renamerSortDescBtn.textContent = '降序 ↓';
+    applyPageToneBtnStyle(renamerSortDescBtn, 'padding: 2px 10px;height: 22px;');
+    var renamerSpacer = document.createElement('div'); renamerSpacer.style.cssText = 'flex: 1;';
+    var renamerSelectAllBtn = document.createElement('button');
+    renamerSelectAllBtn.textContent = '全選';
+    applyPageToneBtnStyle(renamerSelectAllBtn, 'padding: 2px 10px;height: 22px;');
+    var renamerDeselectAllBtn = document.createElement('button');
+    renamerDeselectAllBtn.textContent = '取消全選';
+    applyPageToneBtnStyle(renamerDeselectAllBtn, 'padding: 2px 10px;height: 22px;');
+    var renamerRestoreBtn = document.createElement('button');
+    renamerRestoreBtn.textContent = 'Restore';
+    applyPageToneBtnStyle(renamerRestoreBtn, 'padding: 2px 10px;height: 22px;');
+    var renamerAllSaveBtn = document.createElement('button');
+    renamerAllSaveBtn.textContent = 'All Save';
+    applyPrimaryDarkBtnStyle(renamerAllSaveBtn, 'padding: 0 16px;height: 22px;line-height: 20px;flex-shrink: 0;');
 
-    var seqRow = document.createElement('div');
-    seqRow.style.cssText = 'display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap;';
-    var seqLabel = document.createElement('span'); seqLabel.textContent = '序號重命名:'; seqLabel.style.cssText = 'font-size: 9pt; font-weight: bold; color: #5C0D12; white-space: nowrap; flex-shrink: 0;';
-    var prefixInput = document.createElement('input'); prefixInput.type = 'text'; prefixInput.placeholder = '前綴'; prefixInput.style.cssText = 'width: 70px; border: 1px solid #5C0D12; background: rgb(227,224,209); font-size: 9pt; padding: 0 4px; height: 20px; box-sizing: border-box;';
-    var startNumInput = document.createElement('input'); startNumInput.type = 'number'; startNumInput.placeholder = '起始號'; startNumInput.value = ''; startNumInput.style.cssText = 'width: 60px; border: 1px solid #5C0D12; background: rgb(227,224,209); font-size: 9pt; padding: 0 4px; height: 20px; box-sizing: border-box;';
-    var paddingInput = document.createElement('input'); paddingInput.type = 'number'; paddingInput.placeholder = '位數'; paddingInput.value = ''; paddingInput.style.cssText = 'width: 50px; border: 1px solid #5C0D12; background: rgb(227,224,209); font-size: 9pt; padding: 0 4px; height: 20px; box-sizing: border-box;';
-    var suffixInput = document.createElement('input'); suffixInput.type = 'text'; suffixInput.placeholder = '後綴'; suffixInput.style.cssText = 'width: 70px; border: 1px solid #5C0D12; background: rgb(227,224,209); font-size: 9pt; padding: 0 4px; height: 20px; box-sizing: border-box;';
-    var seqApplyChecked = document.createElement('button'); seqApplyChecked.textContent = '套用勾選'; applyPageToneBtnStyle(seqApplyChecked, 'padding: 0 8px;height: 20px;white-space: nowrap;');
-    var seqApplyAll = document.createElement('button'); seqApplyAll.textContent = '套用全部'; applyPageToneBtnStyle(seqApplyAll, 'padding: 0 8px;height: 20px;white-space: nowrap;');
-    var seqHelpBtn = document.createElement('button'); seqHelpBtn.textContent = '[?]'; applyPageToneBtnStyle(seqHelpBtn, 'padding: 0 6px;height: 20px;white-space: nowrap;');
-    seqHelpBtn.addEventListener('click', function(e) {
-        e.preventDefault();
-        var helpText = '序號重命名說明\n\n前綴：加在序號前方的文字\n起始號：序號從此數字開始（空白則從 1 開始）\n位數：序號補零至指定位數（空白則不補零）\n後綴：加在序號後方的文字\n\n範例：\n前綴=img_ 起始號=1 位數=3 後綴=（空）\n→ img_001.jpg, img_002.jpg, img_003.jpg\n\n前綴=（空）起始號=5 位數=（空）後綴=_pic\n→ 5_pic.jpg, 6_pic.jpg, 7_pic.jpg\n\n前綴=ch1_ 起始號=（空）位數=（空）後綴=（空）\n→ ch1_1.jpg, ch1_2.jpg, ch1_3.jpg';
-        alert(helpText);
-    });
-    seqRow.appendChild(seqLabel);
-    seqRow.appendChild(prefixInput);
-    seqRow.appendChild(startNumInput);
-    seqRow.appendChild(paddingInput);
-    seqRow.appendChild(suffixInput);
-    seqRow.appendChild(seqApplyChecked);
-    seqRow.appendChild(seqApplyAll);
-    seqRow.appendChild(seqHelpBtn);
-    renamerControlsDiv.appendChild(seqRow);
-
-    var replaceRow = document.createElement('div');
-    replaceRow.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;';
-    var replaceLabel = document.createElement('span'); replaceLabel.textContent = '搜索替換:'; replaceLabel.style.cssText = 'font-size: 9pt; font-weight: bold; color: #5C0D12; white-space: nowrap; flex-shrink: 0;';
-    var searchInput = document.createElement('input'); searchInput.type = 'text'; searchInput.placeholder = '搜索'; searchInput.style.cssText = 'width: 120px; border: 1px solid #5C0D12; background: rgb(227,224,209); font-size: 9pt; padding: 0 4px; height: 20px; box-sizing: border-box;';
-    var replaceInput = document.createElement('input'); replaceInput.type = 'text'; replaceInput.placeholder = '替換為'; replaceInput.style.cssText = 'width: 120px; border: 1px solid #5C0D12; background: rgb(227,224,209); font-size: 9pt; padding: 0 4px; height: 20px; box-sizing: border-box;';
-    var regexLabel = document.createElement('label'); regexLabel.style.cssText = 'display: inline-flex; align-items: center; gap: 3px; font-size: 9pt; white-space: nowrap;';
-    var regexCb = document.createElement('input'); regexCb.type = 'checkbox'; regexCb.style.cssText = 'accent-color: #5C0D12;';
-    regexLabel.appendChild(regexCb); regexLabel.appendChild(document.createTextNode('正則'));
-    var replaceApplyChecked = document.createElement('button'); replaceApplyChecked.textContent = '套用勾選'; applyPageToneBtnStyle(replaceApplyChecked, 'padding: 0 8px;height: 20px;white-space: nowrap;');
-    var replaceApplyAll = document.createElement('button'); replaceApplyAll.textContent = '套用全部'; applyPageToneBtnStyle(replaceApplyAll, 'padding: 0 8px;height: 20px;white-space: nowrap;');
-    replaceRow.appendChild(replaceLabel);
-    replaceRow.appendChild(searchInput);
-    replaceRow.appendChild(replaceInput);
-    replaceRow.appendChild(regexLabel);
-    replaceRow.appendChild(replaceApplyChecked);
-    replaceRow.appendChild(replaceApplyAll);
-    renamerControlsDiv.appendChild(replaceRow);
-    fileRenamerPanel.appendChild(renamerControlsDiv);
+    renamerTopRow.appendChild(renamerSortAscBtn);
+    renamerTopRow.appendChild(renamerSortDescBtn);
+    renamerTopRow.appendChild(renamerSpacer);
+    renamerTopRow.appendChild(renamerSelectAllBtn);
+    renamerTopRow.appendChild(renamerDeselectAllBtn);
+    renamerTopRow.appendChild(renamerRestoreBtn);
+    renamerTopRow.appendChild(renamerAllSaveBtn);
+    fileRenamerPanel.appendChild(renamerTopRow);
 
     var renamerListContainer = document.createElement('div');
     renamerListContainer.style.cssText = 'border: 1px solid #5C0D12; background-color: rgb(227,224,209); min-height: 120px; max-height: 400px; overflow-y: auto;';
     fileRenamerPanel.appendChild(renamerListContainer);
 
-    var renamerSnapshot = null;
-    var renamerBottomRow = document.createElement('div');
-    renamerBottomRow.style.cssText = 'display: flex; justify-content: flex-end; margin-top: 8px; gap: 8px;';
-    var cancelRenameBtn = document.createElement('button');
-    cancelRenameBtn.textContent = '取消';
-    applyPageToneBtnStyle(cancelRenameBtn, 'padding: 4px 16px;');
-    var saveRenameBtn = document.createElement('button');
-    saveRenameBtn.textContent = 'Save';
-    applyPrimaryDarkBtnStyle(saveRenameBtn, 'padding: 4px 16px;border: none;');
-    renamerBottomRow.appendChild(cancelRenameBtn);
-    renamerBottomRow.appendChild(saveRenameBtn);
-    fileRenamerPanel.appendChild(renamerBottomRow);
     container.appendChild(fileRenamerPanel);
+
+    var importExportPanel = document.createElement('div');
+    importExportPanel.style.cssText = 'display: none;';
+
+    var importExportTopRow = document.createElement('div');
+    importExportTopRow.style.cssText = 'display: flex; align-items: center; gap: 8px; margin-bottom: 8px;';
+
+    var importExportExportBtn = document.createElement('button');
+    importExportExportBtn.textContent = '導出';
+    applyPageToneBtnStyle(importExportExportBtn, 'padding: 2px 12px;height: 22px;');
+
+    var importExportImportBtn = document.createElement('button');
+    importExportImportBtn.textContent = '導入';
+    applyPageToneBtnStyle(importExportImportBtn, 'padding: 0 12px;height: 22px;line-height: 20px;');
+
+    importExportTopRow.appendChild(importExportExportBtn);
+    importExportTopRow.appendChild(importExportImportBtn);
+    importExportPanel.appendChild(importExportTopRow);
+
+    var importExportTextareaEl = document.createElement('textarea');
+    importExportTextareaEl.style.cssText = 'width: 100%; height: 220px; min-height: 220px; max-height: 220px; box-sizing: border-box; border: 1px solid #5C0D12; background-color: rgb(227,224,209); font-size: 9pt; padding: 6px; resize: none; overflow-x: auto; overflow-y: auto; font-family: monospace; white-space: pre; word-break: normal;';
+    importExportTextareaEl.placeholder = '點擊「導出」生成 {"files":[...]}，或貼上 JSON 後點擊「導入」';
+    importExportPanel.appendChild(importExportTextareaEl);
+
+    importExportTextarea = importExportTextareaEl;
+    container.appendChild(importExportPanel);
 
     var currentFiles = [];
     var currentGalleryId = null;
     var dragSrcIndex = null;
+    var currentSortMethod = 'natural';
+    var currentSortDirection = 'asc';
+    var pendingDeletedGalleryFileKeys = [];
+    var renamerCurrentSortDirection = 'asc';
+    var importExportTextarea = null;
+
+    function getImportExportTextareaSafe() {
+        if (importExportTextarea) return importExportTextarea;
+        if (importExportPanel) {
+            var textarea = importExportPanel.querySelector('textarea');
+            if (textarea) {
+                importExportTextarea = textarea;
+                return textarea;
+            }
+        }
+        return null;
+    }
+
+    function sanitizePositiveIntegerInputValue(rawValue) {
+        return String(rawValue == null ? '' : rawValue).replace(/\D+/g, '');
+    }
+
+    function bindNumericOnlyPositionInput(inputEl) {
+        if (!inputEl) return;
+
+        inputEl.setAttribute('inputmode', 'numeric');
+        inputEl.setAttribute('pattern', '[0-9]*');
+
+        inputEl.addEventListener('input', function() {
+            var sanitized = sanitizePositiveIntegerInputValue(inputEl.value);
+            if (inputEl.value !== sanitized) inputEl.value = sanitized;
+        });
+
+        inputEl.addEventListener('wheel', function(e) {
+            e.preventDefault();
+        }, { passive: false });
+    }
+
+    function findDuplicateImportExportNames(names) {
+        var seen = {};
+        var duplicates = [];
+        names.forEach(function(name) {
+            if (seen[name]) {
+                if (duplicates.indexOf(name) === -1) duplicates.push(name);
+                return;
+            }
+            seen[name] = true;
+        });
+        return duplicates;
+    }
+
+    function serializeCurrentGalleryImportExportPayload() {
+        return JSON.stringify({
+            files: currentFiles.map(function(file) {
+                return getCurrentFileDisplayName(file);
+            })
+        }, null, 2);
+    }
+
+    function hasImportExportFileExtension(name) {
+        name = String(name || '').trim();
+        return /\.[^./\\]+$/.test(name);
+    }
+
+    function validateImportExportFilesPayload(payload) {
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            return { ok: false, message: 'JSON 根節點必須是物件' };
+        }
+
+        if (!Array.isArray(payload.files)) {
+            return { ok: false, message: 'JSON 格式錯誤：缺少 files 陣列' };
+        }
+
+        if (!payload.files.every(function(name) { return typeof name === 'string'; })) {
+            return { ok: false, message: 'files 陣列中的每一項都必須是字串' };
+        }
+
+        var importedNames = payload.files.map(function(name) {
+            return String(name || '').trim();
+        });
+
+        if (importedNames.length !== currentFiles.length) {
+            return {
+                ok: false,
+                message: '檔案數量不一致：目前圖庫為 ' + currentFiles.length + '，JSON 為 ' + importedNames.length
+            };
+        }
+
+        for (var i = 0; i < importedNames.length; i++) {
+            if (!importedNames[i]) {
+                return { ok: false, message: '第 ' + (i + 1) + ' 個檔案名為空' };
+            }
+            if (!hasImportExportFileExtension(importedNames[i])) {
+                return { ok: false, message: '第 ' + (i + 1) + ' 個檔案名缺少副檔名：' + importedNames[i] };
+            }
+        }
+
+        return {
+            ok: true,
+            names: importedNames
+        };
+    }
+
+    function applyImportedFileOrder(names) {
+        currentFiles = currentFiles.map(function(file, index) {
+            var normalized = normalizeGalleryFileListEntry(file);
+            normalized.uploadName = names[index];
+            return normalized;
+        });
+    }
+
+    var ENABLE_FILE_SORT_TRACE = true;
+    function traceFileSort(stage, payload) {
+        if (!ENABLE_FILE_SORT_TRACE) return;
+        try { _debug('[FileSortTrace]', stage, payload); } catch (e) {}
+    }
+
+    function ensureFileSortDebugProbeBound() {
+        if (listContainer.__fifybujMouseSortDebugProbeBound) return;
+        listContainer.__fifybujMouseSortDebugProbeBound = true;
+
+        listContainer.addEventListener('pointerdown', function(e) {
+            var row = e.target && e.target.closest ? e.target.closest('div[data-file-row="1"]') : null;
+            if (!row) return;
+            var isHandle = !!(e.target && e.target.closest && e.target.closest('[data-file-drag-handle="1"]'));
+            traceFileSort('container_pointerdown', {
+                button: e.button,
+                pointerId: typeof e.pointerId === 'number' ? e.pointerId : null,
+                pointerType: e.pointerType || '',
+                rowIndex: row.getAttribute('data-file-index'),
+                isHandle: isHandle,
+                targetTag: e.target && e.target.tagName ? e.target.tagName : ''
+            });
+        }, true);
+
+        listContainer.addEventListener('mousedown', function(e) {
+            var row = e.target && e.target.closest ? e.target.closest('div[data-file-row="1"]') : null;
+            if (!row) return;
+            var isHandle = !!(e.target && e.target.closest && e.target.closest('[data-file-drag-handle="1"]'));
+            traceFileSort('container_mousedown', {
+                button: e.button,
+                rowIndex: row.getAttribute('data-file-index'),
+                isHandle: isHandle,
+                targetTag: e.target && e.target.tagName ? e.target.tagName : ''
+            });
+        }, true);
+    }
+
+    function clearFileRowDropIndicators() {
+        Array.prototype.slice.call(listContainer.querySelectorAll('div[data-file-row="1"]')).forEach(function(r) {
+            r.style.borderTop = '';
+            r.style.borderBottom = '';
+            r.__dropPosition = '';
+        });
+    }
+
+    function captureFileRowRects() {
+        var rects = new Map();
+        Array.prototype.slice.call(listContainer.querySelectorAll('div[data-file-row="1"]')).forEach(function(r) {
+            rects.set(r, r.getBoundingClientRect());
+        });
+        return rects;
+    }
+
+    function playFileRowFlipAnimation(beforeRects) {
+        var rows = Array.prototype.slice.call(listContainer.querySelectorAll('div[data-file-row="1"]'));
+        rows.forEach(function(r) {
+            var before = beforeRects && beforeRects.get ? beforeRects.get(r) : null;
+            if (!before) return;
+
+            var after = r.getBoundingClientRect();
+            var dy = before.top - after.top;
+            if (!isFinite(dy) || Math.abs(dy) < 0.5) return;
+
+            r.style.transition = 'none';
+            r.style.transform = 'translateY(' + dy + 'px)';
+
+            requestAnimationFrame(function() {
+                r.style.transition = 'transform 0.16s ease';
+                r.style.transform = '';
+                setTimeout(function() {
+                    r.style.transition = '';
+                }, 180);
+            });
+        });
+    }
+
+    function resolveNearestFileRowByClientY(clientY) {
+        var state = listContainer.__fifybujMouseSortState;
+        var placeholder = state ? state.placeholderRow : null;
+
+        var rows = Array.prototype.slice.call(listContainer.querySelectorAll('div[data-file-row="1"]'))
+            .filter(function(r) { return r !== placeholder; });
+
+        if (rows.length === 0) return null;
+
+        for (var i = 0; i < rows.length; i++) {
+            var rect = rows[i].getBoundingClientRect();
+            if (clientY <= rect.top + rect.height / 2) return rows[i];
+        }
+        return rows[rows.length - 1];
+    }
+
+    function updateFileRowDropIndicator(rowEl, clientY) {
+        var state = listContainer.__fifybujMouseSortState;
+        if (!state || !state.placeholderRow) return null;
+
+        var placeholderRow = state.placeholderRow;
+        var targetRow = rowEl || resolveNearestFileRowByClientY(clientY);
+
+        if (!targetRow) return null;
+
+        var rect = targetRow.getBoundingClientRect();
+        var isBefore = clientY <= rect.top + rect.height / 2;
+        var beforeRects = captureFileRowRects();
+
+        if (isBefore) {
+            if (targetRow !== placeholderRow.nextSibling) {
+                listContainer.insertBefore(placeholderRow, targetRow);
+            }
+        } else {
+            var next = targetRow.nextSibling;
+            if (next !== placeholderRow) {
+                if (next) listContainer.insertBefore(placeholderRow, next);
+                else listContainer.appendChild(placeholderRow);
+            }
+        }
+
+        playFileRowFlipAnimation(beforeRects);
+
+        var orderedRows = Array.prototype.slice.call(listContainer.querySelectorAll('div[data-file-row="1"]'));
+        var prevTargetIndex = state.lastDropState && typeof state.lastDropState.targetIndex === 'number'
+            ? state.lastDropState.targetIndex
+            : null;
+        var nextTargetIndex = orderedRows.indexOf(placeholderRow);
+
+        state.lastDropState = {
+            targetIndex: nextTargetIndex,
+            didChange: true
+        };
+
+        if (prevTargetIndex !== nextTargetIndex) {
+            traceFileSort('drop_indicator', {
+                clientY: clientY,
+                isBefore: isBefore,
+                targetRowIndex: targetRow.getAttribute('data-file-index'),
+                targetIndex: nextTargetIndex
+            });
+        }
+
+        return state.lastDropState;
+    }
+
+    function cleanupFileMouseSortSession() {
+        var state = listContainer.__fifybujMouseSortState;
+
+        traceFileSort('cleanup:start', {
+            hasState: !!state,
+            sourceIndex: state ? state.sourceIndex : null,
+            pointerId: state ? state.pointerId : null,
+            lastDropState: state ? state.lastDropState : null
+        });
+
+        if (state) {
+            if (state.moveHandler) listContainer.removeEventListener('pointermove', state.moveHandler, true);
+            if (state.upHandler) listContainer.removeEventListener('pointerup', state.upHandler, true);
+            if (state.cancelHandler) listContainer.removeEventListener('pointercancel', state.cancelHandler, true);
+            if (state.keyHandler) document.removeEventListener('keydown', state.keyHandler, true);
+            if (state.blurHandler) window.removeEventListener('blur', state.blurHandler, true);
+            if (state.rafId) cancelAnimationFrame(state.rafId);
+
+            if (state.pointerId !== null && state.pointerId !== undefined && listContainer.releasePointerCapture) {
+                try {
+                    if (!listContainer.hasPointerCapture || listContainer.hasPointerCapture(state.pointerId)) {
+                        listContainer.releasePointerCapture(state.pointerId);
+                    }
+                } catch (e) {}
+            }
+
+            if (state.ghostEl && state.ghostEl.parentNode) {
+                state.ghostEl.parentNode.removeChild(state.ghostEl);
+            }
+
+            if (state.placeholderRow && state.placeholderRow.parentNode) {
+                if (state.draggingRowEl && !state.draggingRowEl.parentNode) {
+                    state.placeholderRow.parentNode.insertBefore(state.draggingRowEl, state.placeholderRow);
+                }
+                state.placeholderRow.parentNode.removeChild(state.placeholderRow);
+            }
+        }
+
+        listContainer.__fifybujMouseSortState = null;
+        document.body.classList.remove('is-dragging');
+        document.body.style.userSelect = '';
+        document.body.style.cursor = '';
+        clearFileRowDropIndicators();
+        dragSrcIndex = null;
+
+        traceFileSort('cleanup:done', { done: true });
+    }
+
+    function beginFileMouseSort(rowEl, sourceIndex, startEvent) {
+        if (!rowEl || !startEvent) {
+            traceFileSort('begin:invalid_args', { hasRow: !!rowEl, hasEvent: !!startEvent });
+            return;
+        }
+        sourceIndex = parseInt(sourceIndex, 10);
+        if (!isFinite(sourceIndex) || sourceIndex < 0 || sourceIndex >= currentFiles.length) {
+            traceFileSort('begin:invalid_index', { sourceIndex: sourceIndex, fileCount: currentFiles.length });
+            return;
+        }
+
+        cleanupFileMouseSortSession();
+
+        dragSrcIndex = sourceIndex;
+        traceFileSort('begin', {
+            sourceIndex: sourceIndex,
+            fileName: currentFiles[sourceIndex] ? (currentFiles[sourceIndex].name || currentFiles[sourceIndex].path || '') : '',
+            clientX: startEvent.clientX,
+            clientY: startEvent.clientY,
+            pointerId: typeof startEvent.pointerId === 'number' ? startEvent.pointerId : null,
+            pointerType: startEvent.pointerType || ''
+        });
+
+        var rowRect = rowEl.getBoundingClientRect();
+        var parent = rowEl.parentNode;
+        if (!parent) {
+            traceFileSort('begin:no_parent', { sourceIndex: sourceIndex });
+            return;
+        }
+
+        var placeholderRow = rowEl.cloneNode(true);
+        placeholderRow.setAttribute('data-file-row', '1');
+        placeholderRow.setAttribute('data-file-index', '-1');
+        placeholderRow.style.opacity = '0.5';
+        placeholderRow.style.pointerEvents = 'none';
+        placeholderRow.style.boxShadow = 'inset 0 0 0 1px #5C0D12';
+        Array.prototype.slice.call(placeholderRow.querySelectorAll('*')).forEach(function(el) {
+            el.style.pointerEvents = 'none';
+        });
+
+        parent.insertBefore(placeholderRow, rowEl);
+        parent.removeChild(rowEl);
+
+        var state = {
+            sourceIndex: sourceIndex,
+            pointerId: typeof startEvent.pointerId === 'number' ? startEvent.pointerId : null,
+            pointerType: startEvent.pointerType || 'mouse',
+            placeholderRow: placeholderRow,
+            draggingRowEl: rowEl,
+            rowWidth: rowRect.width,
+            rowHeight: rowRect.height,
+            offsetX: startEvent.clientX - rowRect.left,
+            offsetY: startEvent.clientY - rowRect.top,
+            lastClientX: startEvent.clientX,
+            lastClientY: startEvent.clientY,
+            lastDropState: { targetIndex: sourceIndex, didChange: false },
+            ghostEl: null,
+            rafId: 0,
+            framePending: false,
+            moveHandler: null,
+            upHandler: null,
+            cancelHandler: null,
+            keyHandler: null,
+            blurHandler: null,
+            loggedFirstMove: false
+        };
+
+        listContainer.__fifybujMouseSortState = state;
+
+        if (state.pointerId !== null && listContainer.setPointerCapture) {
+            try {
+                listContainer.setPointerCapture(state.pointerId);
+                traceFileSort('pointer_capture_set', {
+                    sourceIndex: sourceIndex,
+                    pointerId: state.pointerId
+                });
+            } catch (captureErr) {
+                traceFileSort('pointer_capture_error', {
+                    sourceIndex: sourceIndex,
+                    pointerId: state.pointerId,
+                    message: captureErr && (captureErr.message || String(captureErr))
+                });
+            }
+        }
+
+        function ensureGhost(state, moveEvent) {
+            if (state.ghostEl) return state.ghostEl;
+            document.body.classList.add('is-dragging');
+
+            var ghost = state.draggingRowEl.cloneNode(true);
+            ghost.style.position = 'fixed';
+            ghost.style.left = '0px';
+            ghost.style.top = '0px';
+            ghost.style.width = state.rowWidth + 'px';
+            ghost.style.height = state.rowHeight + 'px';
+            ghost.style.zIndex = '999999';
+            ghost.style.pointerEvents = 'none';
+            ghost.style.opacity = '0.92';
+            ghost.style.boxShadow = '0 4px 12px rgba(0,0,0,0.25)';
+            ghost.style.cursor = 'grabbing';
+            Array.prototype.slice.call(ghost.querySelectorAll('*')).forEach(function(el) {
+                el.style.pointerEvents = 'none';
+            });
+
+            document.body.appendChild(ghost);
+            state.ghostEl = ghost;
+
+            traceFileSort('ghost_created', {
+                sourceIndex: state.sourceIndex,
+                width: state.rowWidth,
+                height: state.rowHeight,
+                clientX: moveEvent && moveEvent.clientX,
+                clientY: moveEvent && moveEvent.clientY
+            });
+
+            return ghost;
+        }
+
+        function moveGhost(state, moveEvent) {
+            var ghost = ensureGhost(state, moveEvent);
+            if (!ghost) return;
+            ghost.style.left = (moveEvent.clientX - state.offsetX) + 'px';
+            ghost.style.top = (moveEvent.clientY - state.offsetY) + 'px';
+        }
+
+        function finishSort(shouldCommit, reason) {
+            var active = listContainer.__fifybujMouseSortState;
+            if (!active) return;
+
+            var targetIndex = active.lastDropState && typeof active.lastDropState.targetIndex === 'number'
+                ? active.lastDropState.targetIndex
+                : active.sourceIndex;
+
+            if (targetIndex < 0) targetIndex = 0;
+            if (targetIndex > currentFiles.length - 1) targetIndex = currentFiles.length - 1;
+
+            traceFileSort('finish', {
+                reason: reason || '',
+                shouldCommit: shouldCommit,
+                sourceIndex: active.sourceIndex,
+                targetIndex: targetIndex,
+                changed: targetIndex !== active.sourceIndex
+            });
+
+            if (shouldCommit && targetIndex !== active.sourceIndex) {
+                var moved = currentFiles.splice(active.sourceIndex, 1)[0];
+                if (moved) {
+                    if (targetIndex > currentFiles.length) targetIndex = currentFiles.length;
+                    currentFiles.splice(targetIndex, 0, moved);
+                }
+            }
+
+            cleanupFileMouseSortSession();
+            renderFileList();
+            if (currentSubPanel === 'foldermanager') renderFolderManager();
+            if (currentSubPanel === 'filerename') renderRenamerList();
+        }
+
+        state.moveHandler = function(moveEvent) {
+            var active = listContainer.__fifybujMouseSortState;
+            if (!active) return;
+            if (active.pointerId !== null && typeof moveEvent.pointerId === 'number' && moveEvent.pointerId !== active.pointerId) return;
+
+            moveEvent.preventDefault();
+            moveEvent.stopPropagation();
+
+            active.lastClientX = moveEvent.clientX;
+            active.lastClientY = moveEvent.clientY;
+
+            if (!active.loggedFirstMove) {
+                active.loggedFirstMove = true;
+                traceFileSort('pointermove:first', {
+                    sourceIndex: active.sourceIndex,
+                    clientX: moveEvent.clientX,
+                    clientY: moveEvent.clientY,
+                    pointerId: moveEvent.pointerId
+                });
+            }
+
+            moveGhost(active, moveEvent);
+
+            if (active.framePending) return;
+            active.framePending = true;
+            active.rafId = requestAnimationFrame(function() {
+                active.framePending = false;
+                if (listContainer.__fifybujMouseSortState !== active) return;
+                updateFileRowDropIndicator(null, active.lastClientY);
+            });
+        };
+
+        state.upHandler = function(upEvent) {
+            if (state.pointerId !== null && typeof upEvent.pointerId === 'number' && upEvent.pointerId !== state.pointerId) return;
+            upEvent.preventDefault();
+            upEvent.stopPropagation();
+            traceFileSort('pointerup', {
+                sourceIndex: state.sourceIndex,
+                clientY: upEvent.clientY,
+                pointerId: upEvent.pointerId
+            });
+            finishSort(true, 'pointerup');
+        };
+
+        state.cancelHandler = function(cancelEvent) {
+            if (state.pointerId !== null && typeof cancelEvent.pointerId === 'number' && cancelEvent.pointerId !== state.pointerId) return;
+            cancelEvent.preventDefault();
+            cancelEvent.stopPropagation();
+            traceFileSort('pointercancel', {
+                sourceIndex: state.sourceIndex,
+                pointerId: cancelEvent.pointerId
+            });
+            finishSort(false, 'pointercancel');
+        };
+
+        state.keyHandler = function(keyEvent) {
+            if (keyEvent.key === 'Escape') {
+                keyEvent.preventDefault();
+                traceFileSort('cancel:escape', { sourceIndex: state.sourceIndex });
+                finishSort(false, 'escape');
+            }
+        };
+
+        state.blurHandler = function() {
+            traceFileSort('cancel:window_blur', { sourceIndex: state.sourceIndex });
+            finishSort(false, 'window_blur');
+        };
+
+        listContainer.addEventListener('pointermove', state.moveHandler, true);
+        listContainer.addEventListener('pointerup', state.upHandler, true);
+        listContainer.addEventListener('pointercancel', state.cancelHandler, true);
+        document.addEventListener('keydown', state.keyHandler, true);
+        window.addEventListener('blur', state.blurHandler, true);
+
+        ensureGhost(state, startEvent);
+        moveGhost(state, startEvent);
+        updateFileRowDropIndicator(null, startEvent.clientY);
+    }
+
+    function getActiveFileComparator() {
+        var baseCompare = currentSortMethod === 'lexical' ? lexicalCompare : naturalCompare;
+        return function(a, b) {
+            var pa = a.path || a.name || '';
+            var pb = b.path || b.name || '';
+            var result = baseCompare(pa, pb);
+            return currentSortDirection === 'desc' ? -result : result;
+        };
+    }
+
+    function applyFileSortButtonState() {
+        var isAsc = currentSortDirection === 'asc';
+        sortAscBtn.style.backgroundColor = isAsc ? '#5C0D12' : '#E0DED3';
+        sortAscBtn.style.color = isAsc ? '#FFFFFF' : '#5C0D12';
+        sortDescBtn.style.backgroundColor = isAsc ? '#E0DED3' : '#5C0D12';
+        sortDescBtn.style.color = isAsc ? '#5C0D12' : '#FFFFFF';
+    }
+
+    function applyRenamerSortButtonState() {
+        var isAsc = renamerCurrentSortDirection === 'asc';
+        renamerSortAscBtn.style.backgroundColor = isAsc ? '#5C0D12' : '#E0DED3';
+        renamerSortAscBtn.style.color = isAsc ? '#FFFFFF' : '#5C0D12';
+        renamerSortDescBtn.style.backgroundColor = isAsc ? '#E0DED3' : '#5C0D12';
+        renamerSortDescBtn.style.color = isAsc ? '#5C0D12' : '#FFFFFF';
+    }
+
+    function sortCurrentFilesAndRender(skipRender) {
+        currentFiles.sort(getActiveFileComparator());
+        if (skipRender) return;
+        renderFileList();
+        if (currentSubPanel === 'foldermanager') renderFolderManager();
+        if (currentSubPanel === 'filerename') renderRenamerList();
+    }
+
+    function loadCurrentGalleryFilesSorted(galleryId) {
+        if (!galleryId) {
+            currentFiles = [];
+            pendingDeletedGalleryFileKeys = [];
+            currentSortMethod = 'natural';
+            currentSortDirection = 'asc';
+            sortingSelect.value = 'natural';
+            applyFileSortButtonState();
+            return;
+        }
+        pendingDeletedGalleryFileKeys = [];
+        var data = readGalleryFileListById(galleryId);
+        currentFiles = data.files.slice();
+        currentSortMethod = 'natural';
+        currentSortDirection = 'asc';
+        sortingSelect.value = 'natural';
+        sortCurrentFilesAndRender(true);
+        applyFileSortButtonState();
+    }
 
     function writeCurrentGalleryFiles() {
         if (!currentGalleryId) return;
         var currentData = readGalleryFileListById(currentGalleryId);
         writeGalleryFileListById(currentGalleryId, currentData.folderName, currentFiles);
+        pendingDeletedGalleryFileKeys = [];
+    }
+
+    function restoreCurrentGalleryFilesFromSaved() {
+        if (!currentGalleryId) {
+            currentFiles = [];
+            return;
+        }
+        var data = readGalleryFileListById(currentGalleryId);
+        currentFiles = Array.isArray(data.files) ? data.files.slice() : [];
+        pendingDeletedGalleryFileKeys = [];
+    }
+
+    function syncRenamerInputsToCurrentFiles() {
+        Array.prototype.slice.call(renamerListContainer.querySelectorAll('input[data-renamer-name-input="1"]')).forEach(function(input) {
+            var idx = parseInt(input.getAttribute('data-renamer-index'), 10);
+            if (!isFinite(idx) || idx < 0 || idx >= currentFiles.length) return;
+            currentFiles[idx] = normalizeGalleryFileListEntry(currentFiles[idx]);
+            currentFiles[idx].uploadName = String(input.value || '');
+        });
+    }
+
+    function getCurrentFileDisplayName(file) {
+        if (!file) return '';
+        if (file.uploadName) return String(file.uploadName);
+        if (file.name) return String(file.name);
+        if (file.originalName) return String(file.originalName);
+        if (file.path) return String(getGalleryFileLeafNameFromPath(file.path) || file.path);
+        return '';
+    }
+
+    function sortCurrentFilesForRenamer(direction) {
+        syncRenamerInputsToCurrentFiles();
+        currentFiles.sort(function(a, b) {
+            var result = naturalCompare(getCurrentFileDisplayName(a), getCurrentFileDisplayName(b));
+            return direction === 'desc' ? -result : result;
+        });
+    }
+
+    function refreshAllFilePanels() {
+        renderFileList();
+        renderFolderManager();
+        renderRenamerList();
+        renderImportExportPanel();
+    }
+
+    function getGalleryFileIdentity(file) {
+        return String((file && (file.path || file.name)) || '');
+    }
+
+    function getCheckedGalleryFileEntries() {
+        var entries = [];
+        Array.prototype.slice.call(listContainer.querySelectorAll('div[data-file-row="1"]')).forEach(function(row) {
+            var cb = row.querySelector('input[type="checkbox"]');
+            var idx = parseInt(row.getAttribute('data-file-index'), 10);
+            if (!cb || !cb.checked) return;
+            if (!isFinite(idx) || idx < 0 || idx >= currentFiles.length) return;
+            entries.push({ index: idx, file: currentFiles[idx] });
+        });
+        return entries;
+    }
+
+    function rememberPendingDeletedGalleryFileEntries(entries) {
+        toArray(entries).forEach(function(entry) {
+            var key = getGalleryFileIdentity(entry && entry.file);
+            if (!key) return;
+            if (pendingDeletedGalleryFileKeys.indexOf(key) === -1) pendingDeletedGalleryFileKeys.push(key);
+        });
+    }
+
+    function saveCheckedGalleryFileChanges() {
+        if (!currentGalleryId) return false;
+
+        var checkedEntries = getCheckedGalleryFileEntries();
+        if (!checkedEntries.length && pendingDeletedGalleryFileKeys.length === 0) return false;
+
+        syncRenamerInputsToCurrentFiles();
+
+        var currentData = readGalleryFileListById(currentGalleryId);
+        var savedFiles = Array.isArray(currentData.files) ? currentData.files.slice() : [];
+        var deletedSet = {};
+        pendingDeletedGalleryFileKeys.forEach(function(key) {
+            deletedSet[key] = true;
+        });
+
+        if (pendingDeletedGalleryFileKeys.length > 0) {
+            savedFiles = savedFiles.filter(function(file) {
+                return !deletedSet[getGalleryFileIdentity(file)];
+            });
+        }
+
+        var selectedSet = {};
+        checkedEntries.forEach(function(entry) {
+            selectedSet[getGalleryFileIdentity(entry.file)] = true;
+        });
+
+        var selectedPositions = [];
+        savedFiles.forEach(function(file, idx) {
+            if (selectedSet[getGalleryFileIdentity(file)]) selectedPositions.push(idx);
+        });
+
+        var currentSelectedFiles = currentFiles.filter(function(file) {
+            return !!selectedSet[getGalleryFileIdentity(file)];
+        });
+
+        selectedPositions.forEach(function(pos, idx) {
+            if (idx < currentSelectedFiles.length) savedFiles[pos] = currentSelectedFiles[idx];
+        });
+
+        writeGalleryFileListById(currentGalleryId, currentData.folderName, savedFiles);
+        currentFiles = savedFiles.slice();
+        pendingDeletedGalleryFileKeys = [];
+        return true;
+    }
+
+    function copyFileTitleWithFeedback(btn, text) {
+        var restoreText = _getFeedbackElementText(btn) || '複製標題';
+        text = String(text == null ? '' : text);
+
+        function handleSuccess() {
+            flashButtonSavedState(btn, '✓', restoreText, 1000);
+        }
+
+        function handleError() {
+            flashColoredErrorState(btn, 'Fail', restoreText, _getConfirmFeedbackSettingsSafe().delayMs);
+        }
+
+        if (!text) {
+            handleError();
+            return;
+        }
+
+        function fallbackCopy() {
+            try {
+                var ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.position = 'fixed';
+                ta.style.left = '-9999px';
+                ta.style.top = '0';
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                var ok = false;
+                try { ok = document.execCommand('copy'); } catch (e) {}
+                document.body.removeChild(ta);
+                if (ok) handleSuccess();
+                else handleError();
+            } catch (e2) {
+                handleError();
+            }
+        }
+
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(function() {
+                    handleSuccess();
+                }).catch(function() {
+                    fallbackCopy();
+                });
+                return;
+            }
+        } catch (e3) {}
+
+        fallbackCopy();
+    }
+
+    function shouldCopyGalleryFolderManagerFileExtension() {
+        var settings = Object.assign({}, getDefaultSettings(), getCurrentSettingsSafe() || {});
+        return settings.galleryFolderManagerCopyWithExtension !== false;
+    }
+
+    function getGalleryFolderManagerCopyText(file) {
+        var text = getCurrentFileDisplayName(file);
+        if (shouldCopyGalleryFolderManagerFileExtension()) return text;
+        var lastDot = text.lastIndexOf('.');
+        if (lastDot <= 0) return text;
+        return text.slice(0, lastDot);
     }
 
     function switchTab(tab) {
@@ -7839,7 +10278,8 @@ function createShowFileListPanel() {
         var tabs = [
             { el: fileListTab, panel: fileListPanel, name: 'filelist' },
             { el: folderManagerTab, panel: folderManagerPanel, name: 'foldermanager' },
-            { el: fileRenamerTab, panel: fileRenamerPanel, name: 'filerename' }
+            { el: fileRenamerTab, panel: fileRenamerPanel, name: 'filerename' },
+            { el: importExportTab, panel: importExportPanel, name: 'importexport' }
         ];
         tabs.forEach(function(t) {
             var active = t.name === tab;
@@ -7848,14 +10288,20 @@ function createShowFileListPanel() {
             t.panel.style.display = active ? 'block' : 'none';
         });
         if (tab === 'foldermanager') renderFolderManager();
-        if (tab === 'filerename') renderRenamerList();
+        if (tab === 'filerename') {
+            renderRenamerList();
+            applyRenamerSortButtonState();
+        }
+        if (tab === 'importexport') renderImportExportPanel();
     }
 
     fileListTab.addEventListener('click', function(e) { e.preventDefault(); switchTab('filelist'); });
     folderManagerTab.addEventListener('click', function(e) { e.preventDefault(); switchTab('foldermanager'); });
     fileRenamerTab.addEventListener('click', function(e) { e.preventDefault(); switchTab('filerename'); });
+    importExportTab.addEventListener('click', function(e) { e.preventDefault(); switchTab('importexport'); });
 
     function renderFileList() {
+        ensureFileSortDebugProbeBound();
         while (listContainer.firstChild) listContainer.removeChild(listContainer.firstChild);
         if (currentFiles.length === 0) {
             var emptyMsg = document.createElement('div');
@@ -7865,52 +10311,212 @@ function createShowFileListPanel() {
             return;
         }
 
-        currentFiles.forEach(function(file, index) {
-            var row = document.createElement('div');
-            row.style.cssText = 'display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-bottom: 1px solid rgba(92,13,18,0.15); background-color: rgb(227,224,209); cursor: grab;';
-            row.draggable = true;
+        function clearFileRowDropIndicators() {
+            listContainer.querySelectorAll('div[data-file-row="1"]').forEach(function(r) {
+                r.style.borderTop = '';
+                r.style.borderBottom = '';
+                r.__dropPosition = '';
+            });
+        }
 
-            row.addEventListener('dragstart', function(e) {
-                dragSrcIndex = index;
-                e.dataTransfer.effectAllowed = 'move';
-                row.style.opacity = '0.4';
-            });
-            row.addEventListener('dragend', function() {
-                row.style.opacity = '1';
-                listContainer.querySelectorAll('div[draggable]').forEach(function(r) { r.style.borderTop = ''; });
-            });
-            row.addEventListener('dragover', function(e) {
+        function clearPreviewBtnErrorTimer(btn) {
+            if (!btn || !btn.__previewErrorTimer) return;
+            clearTimeout(btn.__previewErrorTimer);
+            btn.__previewErrorTimer = null;
+        }
+
+        function setPreviewBtnDefaultStyle(btn) {
+            if (!btn) return;
+            clearPreviewBtnErrorTimer(btn);
+            btn.style.backgroundColor = '#E0DED3';
+            btn.style.color = '#5C0D12';
+            btn.style.borderColor = '#5C0D12';
+            btn.style.outline = 'none';
+            btn.style.boxShadow = 'none';
+        }
+
+        function setPreviewBtnActiveStyle(btn) {
+            if (!btn) return;
+            clearPreviewBtnErrorTimer(btn);
+            btn.style.backgroundColor = '#5C0D12';
+            btn.style.color = '#FFFFFF';
+            btn.style.borderColor = '#5C0D12';
+            btn.style.outline = 'none';
+            btn.style.boxShadow = 'none';
+        }
+
+        function applyPreviewBtnErrorFeedback(btn) {
+            if (!btn) return;
+            var feedbackSettings = _getConfirmFeedbackSettingsSafe();
+            var errorColor = feedbackSettings.errorColor || 'rgb(255,0,0)';
+            var delayMs = (typeof feedbackSettings.delayMs === 'number' && feedbackSettings.delayMs >= 0) ? feedbackSettings.delayMs : 1000;
+
+            clearPreviewBtnErrorTimer(btn);
+            try { btn.blur(); } catch (e) {}
+            btn.classList.remove('preview-btn-active');
+            btn.style.backgroundColor = errorColor;
+            btn.style.color = '#FFFFFF';
+            btn.style.borderColor = errorColor;
+            btn.style.outline = 'none';
+            btn.style.boxShadow = 'none';
+
+            btn.__previewErrorTimer = setTimeout(function() {
+                btn.__previewErrorTimer = null;
+                if (btn.classList.contains('preview-btn-active')) return;
+                btn.style.backgroundColor = '#E0DED3';
+                btn.style.color = '#5C0D12';
+                btn.style.borderColor = '#5C0D12';
+                btn.style.outline = 'none';
+                btn.style.boxShadow = 'none';
+            }, delayMs);
+        }
+
+        function setPreviewBtnErrorStyle(btn) {
+            if (!btn) return;
+            applyPreviewBtnErrorFeedback(btn);
+        }
+
+        function handlePreviewFailure(btn, level, message, payload) {
+            if (level === 'warn') {
+                if (payload === undefined) warnLog('Preview', message);
+                else warnLog('Preview', message, payload);
+            } else {
+                if (payload === undefined) errorLog('Preview', message);
+                else errorLog('Preview', message, payload);
+            }
+            setPreviewBtnErrorStyle(btn);
+        }
+
+        function bindRowDropTarget(targetEl, rowEl) {
+            if (!targetEl || !rowEl) return;
+
+            function showDropIndicator(e) {
+                if (dragSrcIndex === null) return;
                 e.preventDefault();
-                listContainer.querySelectorAll('div[draggable]').forEach(function(r) { r.style.borderTop = ''; });
-                row.style.borderTop = '2px solid #5C0D12';
-            });
-            row.addEventListener('drop', function(e) {
+                e.stopPropagation();
+                if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+
+                var rect = rowEl.getBoundingClientRect();
+                var placeAfter = e.clientY > rect.top + rect.height / 2;
+
+                clearFileRowDropIndicators();
+                rowEl.__dropPosition = placeAfter ? 'after' : 'before';
+                rowEl.style.borderTop = placeAfter ? '' : '2px solid #5C0D12';
+                rowEl.style.borderBottom = placeAfter ? '2px solid #5C0D12' : '';
+            }
+
+            targetEl.addEventListener('dragenter', showDropIndicator);
+            targetEl.addEventListener('dragover', showDropIndicator);
+            targetEl.addEventListener('drop', function(e) {
+                if (dragSrcIndex === null) return;
                 e.preventDefault();
-                if (dragSrcIndex === null || dragSrcIndex === index) return;
-                var moved = currentFiles.splice(dragSrcIndex, 1)[0];
-                currentFiles.splice(index, 0, moved);
+                e.stopPropagation();
+
+                var targetIndex = parseInt(rowEl.getAttribute('data-file-index'), 10);
+                if (isNaN(targetIndex)) {
+                    clearFileRowDropIndicators();
+                    dragSrcIndex = null;
+                    return;
+                }
+
+                if (rowEl.__dropPosition === 'after') targetIndex += 1;
+
+                var sourceIndex = dragSrcIndex;
+                if (sourceIndex < targetIndex) targetIndex--;
+
+                clearFileRowDropIndicators();
+
+                if (targetIndex === sourceIndex) {
+                    dragSrcIndex = null;
+                    return;
+                }
+
+                var moved = currentFiles.splice(sourceIndex, 1)[0];
+                if (!moved) {
+                    dragSrcIndex = null;
+                    return;
+                }
+
+                if (targetIndex < 0) targetIndex = 0;
+                if (targetIndex > currentFiles.length) targetIndex = currentFiles.length;
+
+                currentFiles.splice(targetIndex, 0, moved);
+
                 dragSrcIndex = null;
                 renderFileList();
             });
+        }
+
+        currentFiles.forEach(function(file, index) {
+            var row = document.createElement('div');
+            row.setAttribute('data-file-row', '1');
+            row.setAttribute('data-file-index', String(index));
+            row.draggable = false;
+            row.style.cssText = 'display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-bottom: 1px solid rgba(92,13,18,0.15); background-color: rgb(227,224,209); cursor: default; transition: transform 0.16s ease, background-color 0.12s ease, opacity 0.12s ease, box-shadow 0.12s ease; user-select: none; -webkit-user-select: none;';
 
             var checkBox = document.createElement('input');
             checkBox.type = 'checkbox';
-            checkBox.style.cssText = 'margin: 0; flex-shrink: 0; accent-color: #5C0D12;';
+            checkBox.draggable = false;
+            checkBox.style.cssText = 'margin: 0; width: 16px; height: 16px; flex-shrink: 0; accent-color: #5C0D12; align-self: center; display: block; position: relative; top: 0;';
             row.appendChild(checkBox);
+
+            var dragHandleWrap = document.createElement('div');
+            dragHandleWrap.style.cssText = 'display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; cursor: grab; user-select: none; -webkit-user-drag: none; touch-action: none;';
+            dragHandleWrap.draggable = false;
+            dragHandleWrap.title = '拖曳排序';
+            dragHandleWrap.setAttribute('data-file-drag-handle', '1');
+
+            dragHandleWrap.addEventListener('dragstart', function(e) { e.preventDefault(); });
+            dragHandleWrap.addEventListener('pointerdown', function(e) {
+                traceFileSort('handle_pointerdown', {
+                    index: index,
+                    button: e.button,
+                    pointerId: typeof e.pointerId === 'number' ? e.pointerId : null,
+                    pointerType: e.pointerType || '',
+                    fileName: file.name || file.path || '',
+                    targetTag: e.target && e.target.tagName ? e.target.tagName : ''
+                });
+
+                if ((e.pointerType === 'mouse' || !e.pointerType) && e.button !== 0) return;
+                e.preventDefault();
+                e.stopPropagation();
+                beginFileMouseSort(row, index, e);
+            });
 
             var numSpan = document.createElement('span');
             numSpan.textContent = (index + 1) + '.';
-            numSpan.style.cssText = 'font-size: 9pt; color: #5C0D12; font-weight: bold; min-width: 30px; flex-shrink: 0;';
-            row.appendChild(numSpan);
+            numSpan.style.cssText = 'font-size: 9pt; color: #5C0D12; font-weight: bold; min-width: 30px; flex-shrink: 0; user-select: none;';
+            dragHandleWrap.appendChild(numSpan);
 
-            var nameSpan = document.createElement('span');
-            nameSpan.textContent = file.name || file.path;
-            nameSpan.style.cssText = 'font-size: 9pt; flex: 1; word-break: break-all;';
-            row.appendChild(nameSpan);
+            var dragHandle = document.createElement('span');
+            dragHandle.textContent = getCurrentFileDisplayName(file);
+            dragHandle.style.cssText = 'font-size: 9pt; flex: 1; min-width: 0; word-break: break-all; user-select: none;';
+            dragHandleWrap.appendChild(dragHandle);
+
+            row.appendChild(dragHandleWrap);
+
+            var copyTitleBtn = document.createElement('button');
+            copyTitleBtn.textContent = 'COPY';
+            copyTitleBtn.draggable = false;
+            applyPageToneBtnStyle(copyTitleBtn, 'height: 20px;padding: 0 6px;flex-shrink: 0;font-size: 9pt;outline: none;box-shadow: none;user-select: none;white-space: nowrap;');
+            copyTitleBtn.addEventListener('pointerdown', function(e) {
+                e.stopPropagation();
+            });
+            copyTitleBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                copyFileTitleWithFeedback(copyTitleBtn, getGalleryFolderManagerCopyText(file));
+            });
+            row.appendChild(copyTitleBtn);
 
             var previewBtn = document.createElement('button');
             previewBtn.textContent = '預覧';
-            applyPageToneBtnStyle(previewBtn, 'width: 36px;height: 20px;padding: 0;flex-shrink: 0;font-size: 9pt;');
+            previewBtn.draggable = false;
+            applyPageToneBtnStyle(previewBtn, 'width: 36px;height: 20px;padding: 0;flex-shrink: 0;font-size: 9pt;outline: none;box-shadow: none;user-select: none;');
+            previewBtn.addEventListener('pointerdown', function(e) {
+                e.stopPropagation();
+            });
+            setPreviewBtnDefaultStyle(previewBtn);
 
             (function(f, btn) {
                 btn.addEventListener('click', function(e) {
@@ -7919,114 +10525,111 @@ function createShowFileListPanel() {
                     var existingOverlay = document.getElementById('file-preview-overlay');
                     var existingActiveBtn = document.querySelector('.preview-btn-active');
                     if (existingActiveBtn && existingActiveBtn !== btn) {
-                        existingActiveBtn.style.backgroundColor = '#E0DED3';
-                        existingActiveBtn.style.color = '#5C0D12';
-                        existingActiveBtn.style.borderColor = '#5C0D12';
+                        setPreviewBtnDefaultStyle(existingActiveBtn);
                         existingActiveBtn.classList.remove('preview-btn-active');
                     }
                     if (existingOverlay) { existingOverlay.remove(); }
 
-                    btn.style.backgroundColor = '#5C0D12';
-                    btn.style.color = '#FFFFFF';
-                    btn.style.borderColor = '#5C0D12';
+                    setPreviewBtnActiveStyle(btn);
                     btn.classList.add('preview-btn-active');
 
-                    var fileListData = currentGalleryId ? readGalleryFileListById(currentGalleryId) : { folderName: null, files: [] };
-                    var folderName = fileListData.folderName || null;
-                    if (!folderName) {
-                        warnLog('Preview', 'ZIP 來源檔案無法預覧', f.name || f.path);
-                        btn.style.backgroundColor = '#CC0000';
-                        btn.style.color = '#FFFFFF';
-                        btn.style.borderColor = '#CC0000';
+                    var fileListData = currentGalleryId ? readGalleryFileListById(currentGalleryId) : {
+                        folderName: null,
+                        sourceType: null,
+                        authorizedRootId: null,
+                        files: []
+                    };
+                    if (fileListData.sourceType !== 'folder') {
+                        handlePreviewFailure(btn, 'warn', '僅文件夾來源支援預覧', f.name || f.path);
+                        return;
+                    }
+
+                    var sourcePath = String((f && (f.path || f.originalPath || f.name)) || '');
+                    if (!sourcePath) {
+                        handlePreviewFailure(btn, 'warn', '無法解析檔案路徑', f.name || f.path);
                         return;
                     }
 
                     var maxW = currentSettings.previewMaxWidth || 800;
                     var maxH = currentSettings.previewMaxHeight || 800;
-                    dbGet('handles', 'root_folder_handle').then(function(rootHandle) {
+                    getAuthorizedRootHandleByIdOrLegacy(fileListData.authorizedRootId).then(function(rootHandle) {
                         if (!rootHandle) {
-                            warnLog('Preview', '無 root_folder_handle');
-                            btn.style.backgroundColor = '#CC0000';
-                            btn.style.color = '#FFFFFF';
-                            btn.style.borderColor = '#CC0000';
+                            handlePreviewFailure(btn, 'warn', '無已授權文件夾 handle');
                             return;
                         }
-                        return rootHandle.requestPermission({ mode: 'read' }).then(function(perm) {
-                            if (perm !== 'granted') {
-                                warnLog('Preview', '無讀取權限');
-                                btn.style.backgroundColor = '#CC0000';
-                                btn.style.color = '#FFFFFF';
-                                btn.style.borderColor = '#CC0000';
+                        return requestReadPermissionIfNeeded(rootHandle).then(function(canRead) {
+                            if (!canRead) {
+                                handlePreviewFailure(btn, 'warn', '無讀取權限');
                                 return;
                             }
-                            return rootHandle.getDirectoryHandle(folderName).then(function(folderHandle) {
-                                var parts = (f.path || f.name || '').split('/');
-                                function resolveHandle(handle, partsArr) {
-                                    if (partsArr.length === 1) return handle.getFileHandle(partsArr[0]).then(function(fh) { return fh.getFile(); });
-                                    return handle.getDirectoryHandle(partsArr[0]).then(function(dh) { return resolveHandle(dh, partsArr.slice(1)); });
+                            return resolveFileObjectFromDirectoryHandlePath(rootHandle, sourcePath).then(function(fileObj) {
+                                var url = URL.createObjectURL(fileObj);
+                                var overlay = document.createElement('div');
+                                overlay.id = 'file-preview-overlay';
+                                overlay.style.cssText = 'position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.7); z-index: 99999; display: flex; align-items: center; justify-content: center;';
+                                var imgBox = document.createElement('div');
+                                imgBox.style.cssText = 'background: #1a1a1a; border-radius: 6px; padding: 8px; display: flex; flex-direction: column; align-items: center; gap: 6px; max-width: ' + maxW + 'px;';
+                                var img = document.createElement('img');
+                                img.src = url;
+                                img.style.cssText = 'max-width: ' + maxW + 'px; max-height: ' + maxH + 'px; object-fit: contain; border-radius: 3px; display: block;';
+                                img.onerror = function() { warnLog('Preview', '圖片載入失敗', f.name || f.path); };
+                                var labelEl = document.createElement('div');
+                                labelEl.textContent = f.name || f.path;
+                                labelEl.style.cssText = 'font-size: 8pt; color: #ccc; word-break: break-all; text-align: center; max-width: ' + maxW + 'px;';
+                                imgBox.appendChild(img);
+                                imgBox.appendChild(labelEl);
+                                overlay.appendChild(imgBox);
+                                document.body.appendChild(overlay);
+
+                                function closePreview() {
+                                    URL.revokeObjectURL(url);
+                                    overlay.remove();
+                                    setPreviewBtnDefaultStyle(btn);
+                                    btn.classList.remove('preview-btn-active');
+                                    document.removeEventListener('keydown', escHandler);
                                 }
-                                return resolveHandle(folderHandle, parts).then(function(fileObj) {
-                                    var url = URL.createObjectURL(fileObj);
-                                    var overlay = document.createElement('div');
-                                    overlay.id = 'file-preview-overlay';
-                                    overlay.style.cssText = 'position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.7); z-index: 99999; display: flex; align-items: center; justify-content: center;';
-                                    var imgBox = document.createElement('div');
-                                    imgBox.style.cssText = 'background: #1a1a1a; border-radius: 6px; padding: 8px; display: flex; flex-direction: column; align-items: center; gap: 6px; max-width: ' + maxW + 'px;';
-                                    var img = document.createElement('img');
-                                    img.src = url;
-                                    img.style.cssText = 'max-width: ' + maxW + 'px; max-height: ' + maxH + 'px; object-fit: contain; border-radius: 3px; display: block;';
-                                    img.onerror = function() { warnLog('Preview', '圖片載入失敗', f.name || f.path); };
-                                    var labelEl = document.createElement('div');
-                                    labelEl.textContent = f.name || f.path;
-                                    labelEl.style.cssText = 'font-size: 8pt; color: #ccc; word-break: break-all; text-align: center; max-width: ' + maxW + 'px;';
-                                    imgBox.appendChild(img);
-                                    imgBox.appendChild(labelEl);
-                                    overlay.appendChild(imgBox);
-                                    document.body.appendChild(overlay);
 
-                                    function closePreview() {
-                                        URL.revokeObjectURL(url);
-                                        overlay.remove();
-                                        btn.style.backgroundColor = '#E0DED3';
-                                        btn.style.color = '#5C0D12';
-                                        btn.style.borderColor = '#5C0D12';
-                                        btn.classList.remove('preview-btn-active');
-                                        document.removeEventListener('keydown', escHandler);
-                                    }
+                                function escHandler(ev) {
+                                    if (ev.key === 'Escape') closePreview();
+                                }
 
-                                    function escHandler(ev) {
-                                        if (ev.key === 'Escape') closePreview();
-                                    }
-
-                                    document.addEventListener('keydown', escHandler);
-                                    overlay.addEventListener('click', function(ev) {
-                                        if (ev.target === overlay) closePreview();
-                                    });
-                                }).catch(function(err) {
-                                    warnLog('Preview', '無法解析檔案', { path: f.path, message: err.message });
+                                document.addEventListener('keydown', escHandler);
+                                overlay.addEventListener('click', function(ev) {
+                                    if (ev.target === overlay) closePreview();
                                 });
+                            }).catch(function(err) {
+                                handlePreviewFailure(btn, 'warn', '無法解析檔案', { path: sourcePath, message: err.message });
                             });
                         });
                     }).catch(function(err) {
-                        errorLog('Preview', '錯誤', { name: err.name, message: err.message, error: err });
-                        btn.style.backgroundColor = '#CC0000';
-                        btn.style.color = '#FFFFFF';
-                        btn.style.borderColor = '#CC0000';
+                        handlePreviewFailure(btn, 'error', '錯誤', { name: err.name, message: err.message, error: err });
                     });
                 });
             })(file, previewBtn);
             row.appendChild(previewBtn);
 
             var posInput = document.createElement('input');
-            posInput.type = 'number';
-            posInput.min = '1';
-            posInput.max = String(currentFiles.length);
+            posInput.type = 'text';
+            posInput.draggable = false;
             posInput.value = String(index + 1);
-            posInput.style.cssText = 'width: 44px; border: 1px solid #5C0D12; background-color: rgb(227,224,209); font-size: 9pt; padding: 0 2px; height: 20px; box-sizing: border-box; flex-shrink: 0; text-align: center;';
+            posInput.style.cssText = 'width: 44px; border: 1px solid #5C0D12; background-color: rgb(227,224,209); font-size: 9pt; padding: 0 2px; height: 20px; box-sizing: border-box; flex-shrink: 0; text-align: center; user-select: text; -webkit-user-select: text;';
+            bindNumericOnlyPositionInput(posInput);
+            posInput.addEventListener('blur', function() {
+                var sanitized = sanitizePositiveIntegerInputValue(posInput.value);
+                if (!sanitized || parseInt(sanitized, 10) < 1) {
+                    posInput.value = String(index + 1);
+                    return;
+                }
+                posInput.value = sanitized;
+            });
             posInput.addEventListener('keydown', function(e) {
                 if (e.key !== 'Enter') return;
-                var target = parseInt(posInput.value, 10) - 1;
-                if (isNaN(target) || target < 0 || target >= currentFiles.length || target === index) return;
+                var sanitized = sanitizePositiveIntegerInputValue(posInput.value);
+                var target = parseInt(sanitized, 10) - 1;
+                if (!sanitized || isNaN(target) || target < 0 || target >= currentFiles.length || target === index) {
+                    posInput.value = String(index + 1);
+                    return;
+                }
                 var moved = currentFiles.splice(index, 1)[0];
                 currentFiles.splice(target, 0, moved);
                 renderFileList();
@@ -8035,6 +10638,7 @@ function createShowFileListPanel() {
 
             var upBtn = document.createElement('button');
             upBtn.textContent = '↑';
+            upBtn.draggable = false;
             applyPageToneBtnStyle(upBtn, 'width: 22px;height: 20px;padding: 0;flex-shrink: 0;font-size: 9pt;');
             if (index === 0) { upBtn.style.opacity = '0.3'; upBtn.style.cursor = 'default'; }
             upBtn.addEventListener('click', function(e) {
@@ -8049,6 +10653,7 @@ function createShowFileListPanel() {
 
             var downBtn = document.createElement('button');
             downBtn.textContent = '↓';
+            downBtn.draggable = false;
             applyPageToneBtnStyle(downBtn, 'width: 22px;height: 20px;padding: 0;flex-shrink: 0;font-size: 9pt;');
             if (index === currentFiles.length - 1) { downBtn.style.opacity = '0.3'; downBtn.style.cursor = 'default'; }
             downBtn.addEventListener('click', function(e) {
@@ -8063,6 +10668,7 @@ function createShowFileListPanel() {
 
             var delBtn = document.createElement('button');
             delBtn.textContent = '✕';
+            delBtn.draggable = false;
             applyPageToneBtnStyle(delBtn, 'width: 22px;height: 20px;padding: 0;flex-shrink: 0;font-size: 9pt;');
             delBtn.addEventListener('click', function(e) {
                 e.preventDefault();
@@ -8087,9 +10693,37 @@ function createShowFileListPanel() {
             return;
         }
 
+        var galleryData = currentGalleryId ? readGalleryFileListById(currentGalleryId) : {
+            folderName: null,
+            sourceType: null,
+            sourceLabel: null,
+            rootSources: []
+        };
+        var rootSources = normalizeGalleryRootSources(galleryData.rootSources, galleryData.sourceType, galleryData.sourceLabel);
+        var rootIconMap = {};
+        rootSources.forEach(function(item) {
+            if (!rootIconMap[item.name]) rootIconMap[item.name] = item.type;
+        });
+
+        function getFolderManagerDisplayPath(fileEntry) {
+            var normalized = normalizeGalleryFileListEntry(fileEntry);
+            var path = String(normalized.path || normalized.originalPath || normalized.originalName || '').trim();
+            if (!path) return '';
+
+            if (rootSources.length === 1) {
+                var rootName = String(rootSources[0].name || '').trim();
+                if (rootName && path !== rootName && path.indexOf(rootName + '/') !== 0) {
+                    return rootName + '/' + path;
+                }
+            }
+
+            return path;
+        }
+
         var folderTree = {};
         currentFiles.forEach(function(file) {
-            var parts = (file.path || file.name || '').split('/');
+            var displayPath = getFolderManagerDisplayPath(file);
+            var parts = displayPath.split('/').filter(function(part) { return !!part; });
             if (parts.length <= 1) return;
             var dirs = parts.slice(0, -1);
             var node = folderTree;
@@ -8104,9 +10738,22 @@ function createShowFileListPanel() {
                 var fullPath = path ? path + '/' + key : key;
                 var row = document.createElement('div');
                 row.style.cssText = 'display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-bottom: 1px solid rgba(92,13,18,0.15); background-color: rgb(227,224,209);';
+
                 var indent = document.createElement('span');
                 indent.style.cssText = 'display: inline-block; width: ' + (depth * 16) + 'px; flex-shrink: 0;';
                 row.appendChild(indent);
+
+                var checkBox = document.createElement('input');
+                checkBox.type = 'checkbox';
+                checkBox.style.cssText = 'margin: 0; width: 16px; height: 16px; flex-shrink: 0; accent-color: #5C0D12; align-self: center; display: block; position: relative; top: 0;';
+                row.appendChild(checkBox);
+
+                if (depth === 0 && rootIconMap[key]) {
+                    var sourceIcon = document.createElement('span');
+                    sourceIcon.textContent = rootIconMap[key] === 'folder' ? '📁' : '📦';
+                    sourceIcon.style.cssText = 'font-size: 11pt; line-height: 1; flex-shrink: 0;';
+                    row.appendChild(sourceIcon);
+                }
 
                 var nameSpan = document.createElement('span');
                 nameSpan.textContent = key + '/';
@@ -8119,7 +10766,7 @@ function createShowFileListPanel() {
                 delBtn.addEventListener('click', function(e) {
                     e.preventDefault();
                     currentFiles = currentFiles.filter(function(f) {
-                        var p = f.path || f.name || '';
+                        var p = getFolderManagerDisplayPath(f);
                         return !p.startsWith(fullPath + '/') && p !== fullPath;
                     });
                     renderFolderManager();
@@ -8138,9 +10785,6 @@ function createShowFileListPanel() {
 
     function renderRenamerList() {
         while (renamerListContainer.firstChild) renamerListContainer.removeChild(renamerListContainer.firstChild);
-        if (renamerSnapshot === null && currentFiles.length > 0) {
-            renamerSnapshot = currentFiles.map(function(f) { return Object.assign({}, f); });
-        }
         if (currentFiles.length === 0) {
             var emptyMsg = document.createElement('div');
             emptyMsg.textContent = '無文件';
@@ -8155,7 +10799,7 @@ function createShowFileListPanel() {
 
             var checkBox = document.createElement('input');
             checkBox.type = 'checkbox';
-            checkBox.style.cssText = 'margin: 0; flex-shrink: 0; accent-color: #5C0D12;';
+            checkBox.style.cssText = 'margin: 0; width: 16px; height: 16px; flex-shrink: 0; accent-color: #5C0D12; align-self: center; display: block; position: relative; top: 0;';
             row.appendChild(checkBox);
 
             var numSpan = document.createElement('span');
@@ -8165,10 +10809,17 @@ function createShowFileListPanel() {
 
             var nameInput = document.createElement('input');
             nameInput.type = 'text';
-            nameInput.value = file.name || file.path;
-            nameInput.style.cssText = 'flex: 1; border: 1px solid #5C0D12; background: rgb(227,224,209); font-size: 9pt; padding: 0 4px; height: 20px; box-sizing: border-box;';
+            nameInput.value = getCurrentFileDisplayName(file);
+            nameInput.setAttribute('data-renamer-name-input', '1');
+            nameInput.setAttribute('data-renamer-index', String(index));
+            nameInput.style.cssText = 'flex: 1; border: 1px solid #5C0D12; background: rgb(227,224,209); font-size: 9pt; padding: 0 4px; height: 20px; box-sizing: border-box; user-select: text; -webkit-user-select: text;';
+            nameInput.addEventListener('input', function() {
+                currentFiles[index] = normalizeGalleryFileListEntry(currentFiles[index]);
+                currentFiles[index].uploadName = nameInput.value;
+            });
             nameInput.addEventListener('change', function() {
-                currentFiles[index].name = nameInput.value;
+                currentFiles[index] = normalizeGalleryFileListEntry(currentFiles[index]);
+                currentFiles[index].uploadName = nameInput.value;
             });
             row.appendChild(nameInput);
 
@@ -8176,113 +10827,80 @@ function createShowFileListPanel() {
         });
     }
 
-    function applySeqRename(indices) {
-        var start = startNumInput.value !== '' ? (parseInt(startNumInput.value, 10) || 1) : 1;
-        var padVal = paddingInput.value !== '' ? parseInt(paddingInput.value, 10) : null;
-        var prefix = prefixInput.value;
-        var suffix = suffixInput.value;
-        var counter = start;
-        indices.forEach(function(i) {
-            var file = currentFiles[i];
-            var ext = (file.name || file.path || '').split('.').pop();
-            var numStr = String(counter);
-            if (padVal !== null && padVal > 0) numStr = numStr.padStart(padVal, '0');
-            file.name = prefix + numStr + suffix + '.' + ext;
-            counter++;
-        });
-        renderRenamerList();
+    function renderImportExportPanel() {
+        var textarea = getImportExportTextareaSafe();
+        if (!textarea) return;
+
+        if (!currentGalleryId) {
+            textarea.value = '';
+            textarea.placeholder = '請先在上方選擇圖庫';
+            return;
+        }
+
+        if (!String(textarea.value || '').trim()) {
+            textarea.placeholder = '點擊「導出」生成 {"files":[...]}，或貼上 JSON 後點擊「導入」';
+        }
     }
 
-    function applyReplaceRename(indices) {
-        var search = searchInput.value;
-        var replace = replaceInput.value;
-        if (!search) return;
-        indices.forEach(function(i) {
-            var file = currentFiles[i];
-            var name = file.name || file.path || '';
-            try {
-                if (regexCb.checked) {
-                    var re = new RegExp(search, 'g');
-                    file.name = name.replace(re, replace);
-                } else {
-                    file.name = name.split(search).join(replace);
-                }
-            } catch (err) {
-                errorLog('Renamer', '正則錯誤', err.message);
-            }
-        });
-        opLog('批量重新命名', { mode: 'replace', count: indices.length, search: search, replace: replace, regex: regexCb.checked });
-        renderRenamerList();
-    }
 
-    seqApplyChecked.addEventListener('click', function(e) {
-        e.preventDefault();
-        var checkboxes = renamerListContainer.querySelectorAll('input[type="checkbox"]');
-        var indices = [];
-        checkboxes.forEach(function(cb, i) { if (cb.checked) indices.push(i); });
-        applySeqRename(indices);
-    });
-
-    seqApplyAll.addEventListener('click', function(e) {
-        e.preventDefault();
-        applySeqRename(currentFiles.map(function(_, i) { return i; }));
-        opLog('批量重新命名', { mode: 'sequence', count: currentFiles.length, scope: 'all' });
-    });
-
-    replaceApplyChecked.addEventListener('click', function(e) {
-        e.preventDefault();
-        var checkboxes = renamerListContainer.querySelectorAll('input[type="checkbox"]');
-        var indices = [];
-        checkboxes.forEach(function(cb, i) { if (cb.checked) indices.push(i); });
-        applyReplaceRename(indices);
-    });
-
-    replaceApplyAll.addEventListener('click', function(e) {
-        e.preventDefault();
-        applyReplaceRename(currentFiles.map(function(_, i) { return i; }));
-    });
 
     sortAscBtn.addEventListener('click', function(e) {
         e.preventDefault();
-        currentFiles.sort(function(a, b) { return naturalCompare(a.path || a.name || '', b.path || b.name || ''); });
-        renderFileList();
-        sortAscBtn.style.backgroundColor = '#5C0D12';
-        sortAscBtn.style.color = '#FFFFFF';
-        sortDescBtn.style.backgroundColor = '#E0DED3';
-        sortDescBtn.style.color = '#5C0D12';
+        currentSortDirection = 'asc';
+        sortCurrentFilesAndRender(false);
+        applyFileSortButtonState();
     });
 
     sortDescBtn.addEventListener('click', function(e) {
         e.preventDefault();
-        currentFiles.sort(function(a, b) { return naturalCompare(b.path || b.name || '', a.path || a.name || ''); });
-        renderFileList();
-        sortDescBtn.style.backgroundColor = '#5C0D12';
-        sortDescBtn.style.color = '#FFFFFF';
-        sortAscBtn.style.backgroundColor = '#E0DED3';
-        sortAscBtn.style.color = '#5C0D12';
+        currentSortDirection = 'desc';
+        sortCurrentFilesAndRender(false);
+        applyFileSortButtonState();
     });
 
     sortGoBtn.addEventListener('click', function(e) {
         e.preventDefault();
-        var method = sortingSelect.value;
-        currentFiles.sort(function(a, b) {
-            var pa = a.path || a.name || '', pb = b.path || b.name || '';
-            return method === 'natural' ? naturalCompare(pa, pb) : lexicalCompare(pa, pb);
-        });
-        renderFileList();
+        currentSortMethod = sortingSelect.value;
+        sortCurrentFilesAndRender(false);
+        applyFileSortButtonState();
     });
 
     actionGoBtn.addEventListener('click', function(e) {
         e.preventDefault();
+
+        if (actionSelect.value === 'save') {
+            var checkedEntriesToSave = getCheckedGalleryFileEntries();
+            var pendingDeletedCount = pendingDeletedGalleryFileKeys.length;
+            if (!checkedEntriesToSave.length && pendingDeletedCount === 0) {
+                flashButtonErrorState(actionGoBtn, 'Fail', 'GO', 1000);
+                return;
+            }
+            if (saveCheckedGalleryFileChanges()) {
+                opLog('保存勾選 Gallery File', {
+                    galleryId: currentGalleryId,
+                    count: checkedEntriesToSave.length,
+                    pendingDeleted: pendingDeletedCount
+                });
+                refreshAllFilePanels();
+                flashButtonSavedState(actionGoBtn, '✓', 'GO', 1000);
+            } else {
+                flashButtonErrorState(actionGoBtn, 'Fail', 'GO', 1000);
+            }
+            return;
+        }
+
         if (actionSelect.value !== 'delete') return;
-        var checkboxes = listContainer.querySelectorAll('input[type="checkbox"]');
-        var indicesToDelete = [];
-        checkboxes.forEach(function(cb, i) { if (cb.checked) indicesToDelete.push(i); });
-        indicesToDelete.reverse().forEach(function(i) { currentFiles.splice(i, 1); });
+
+        var checkedEntriesToDelete = getCheckedGalleryFileEntries();
+        var indicesToDelete = checkedEntriesToDelete.map(function(entry) {
+            return entry.index;
+        });
+        rememberPendingDeletedGalleryFileEntries(checkedEntriesToDelete);
+        indicesToDelete.reverse().forEach(function(i) {
+            currentFiles.splice(i, 1);
+        });
         if (indicesToDelete.length > 0) opLog('刪除 Gallery File', { count: indicesToDelete.length });
-        renderFileList();
-        if (currentSubPanel === 'foldermanager') renderFolderManager();
-        if (currentSubPanel === 'filerename') renderRenamerList();
+        refreshAllFilePanels();
     });
 
     selectAllBtn.addEventListener('click', function(e) {
@@ -8295,12 +10913,20 @@ function createShowFileListPanel() {
         listContainer.querySelectorAll('input[type="checkbox"]').forEach(function(cb) { cb.checked = false; });
     });
 
-    saveOrderBtn.addEventListener('click', function(e) {
+    fileListRestoreBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        if (!currentGalleryId) return;
+        restoreCurrentGalleryFilesFromSaved();
+        refreshAllFilePanels();
+        flashButtonSavedState(fileListRestoreBtn, '已恢復 ✓', 'Restore', 1000);
+    });
+
+    fileListAllSaveBtn.addEventListener('click', function(e) {
         e.preventDefault();
         if (!currentGalleryId) return;
         writeCurrentGalleryFiles();
         opLog('保存檔案順序', { galleryId: currentGalleryId, count: currentFiles.length });
-        flashButtonSavedState(saveOrderBtn, '已保存 ✓', 'Save Order', 1500);
+        flashButtonSavedState(fileListAllSaveBtn, '已保存 ✓', 'All Save', 1500);
     });
 
     saveFolderBtn.addEventListener('click', function(e) {
@@ -8311,20 +10937,110 @@ function createShowFileListPanel() {
         flashButtonSavedState(saveFolderBtn, '已保存 ✓', 'Save', 1500);
     });
 
-    cancelRenameBtn.addEventListener('click', function(e) {
+    renamerSortAscBtn.addEventListener('click', function(e) {
         e.preventDefault();
-        if (!renamerSnapshot) return;
-        currentFiles = renamerSnapshot.map(function(f) { return Object.assign({}, f); });
-        renderRenamerList();
+        renamerCurrentSortDirection = 'asc';
+        sortCurrentFilesForRenamer('asc');
+        refreshAllFilePanels();
+        applyRenamerSortButtonState();
     });
 
-    saveRenameBtn.addEventListener('click', function(e) {
+    renamerSortDescBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        renamerCurrentSortDirection = 'desc';
+        sortCurrentFilesForRenamer('desc');
+        refreshAllFilePanels();
+        applyRenamerSortButtonState();
+    });
+
+    renamerSelectAllBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        renamerListContainer.querySelectorAll('input[type="checkbox"]').forEach(function(cb) { cb.checked = true; });
+    });
+
+    renamerDeselectAllBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        renamerListContainer.querySelectorAll('input[type="checkbox"]').forEach(function(cb) { cb.checked = false; });
+    });
+
+    renamerRestoreBtn.addEventListener('click', function(e) {
         e.preventDefault();
         if (!currentGalleryId) return;
+        restoreCurrentGalleryFilesFromSaved();
+        refreshAllFilePanels();
+        flashButtonSavedState(renamerRestoreBtn, '已恢復 ✓', 'Restore', 1000);
+    });
+
+    renamerAllSaveBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        if (!currentGalleryId) return;
+        syncRenamerInputsToCurrentFiles();
         writeCurrentGalleryFiles();
-        renamerSnapshot = currentFiles.map(function(f) { return Object.assign({}, f); });
         opLog('保存重新命名結果', { galleryId: currentGalleryId, count: currentFiles.length });
-        flashButtonSavedState(saveRenameBtn, '已保存 ✓', 'Save', 1500);
+        refreshAllFilePanels();
+        flashButtonSavedState(renamerAllSaveBtn, '已保存 ✓', 'All Save', 1500);
+    });
+
+    importExportExportBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        if (!currentGalleryId) {
+            flashButtonErrorState(importExportExportBtn, 'Fail', '導出', 1000);
+            return;
+        }
+
+        var textarea = getImportExportTextareaSafe();
+        if (!textarea) {
+            warnLog('ImportExport', '找不到 Import/Export 輸入框');
+            flashButtonErrorState(importExportExportBtn, 'Fail', '導出', 1000);
+            return;
+        }
+
+        textarea.value = serializeCurrentGalleryImportExportPayload();
+        flashButtonSavedState(importExportExportBtn, '已導出 ✓', '導出', 1000);
+    });
+
+    importExportImportBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+
+        var importFailDelayMs = _getConfirmFeedbackSettingsSafe().delayMs;
+
+        function flashImportExportImportFail() {
+            flashColoredErrorState(importExportImportBtn, 'Fail', '導入', importFailDelayMs);
+        }
+
+        if (!currentGalleryId) {
+            flashImportExportImportFail();
+            return;
+        }
+
+        var textarea = getImportExportTextareaSafe();
+        if (!textarea) {
+            warnLog('ImportExport', '找不到 Import/Export 輸入框');
+            flashImportExportImportFail();
+            return;
+        }
+
+        var payload = null;
+        try {
+            payload = JSON.parse(textarea.value);
+        } catch (err) {
+            warnLog('ImportExport', 'JSON 解析失敗', err && err.message ? err.message : err);
+            flashImportExportImportFail();
+            return;
+        }
+
+        var validation = validateImportExportFilesPayload(payload);
+        if (!validation.ok) {
+            warnLog('ImportExport', validation.message);
+            flashImportExportImportFail();
+            return;
+        }
+
+        applyImportedFileOrder(validation.names);
+        writeCurrentGalleryFiles();
+        refreshAllFilePanels();
+        opLog('ImportExport 導入成功', { galleryId: currentGalleryId, count: validation.names.length });
+        flashButtonSavedState(importExportImportBtn, '已導入 ✓', '導入', 1000);
     });
 
     function refreshGallerySelect() {
@@ -8346,37 +11062,42 @@ function createShowFileListPanel() {
         if (prevId) {
             gallerySelect.value = prevId;
             if (gallerySelect.value === prevId) {
-                var data = readGalleryFileListById(prevId);
-                currentFiles = data.files.slice();
+                currentGalleryId = prevId;
+                loadCurrentGalleryFilesSorted(prevId);
             } else {
                 currentGalleryId = null;
-                currentFiles = [];
+                loadCurrentGalleryFilesSorted(null);
             }
         } else {
-            currentFiles = [];
+            currentGalleryId = null;
+            loadCurrentGalleryFilesSorted(null);
         }
+
         renderFileList();
         if (currentSubPanel === 'foldermanager') renderFolderManager();
         if (currentSubPanel === 'filerename') renderRenamerList();
+        renderImportExportPanel();
     }
 
     container.refreshPanel = function() { refreshGallerySelect(); };
 
     gallerySelect.addEventListener('change', function() {
         currentGalleryId = this.value;
+
         if (!currentGalleryId) {
-            currentFiles = [];
+            loadCurrentGalleryFilesSorted(null);
             renderFileList();
             renderFolderManager();
             renderRenamerList();
+            renderImportExportPanel();
             return;
         }
-        var data = readGalleryFileListById(currentGalleryId);
-        currentFiles = data.files.slice();
-        renamerSnapshot = null;
+
+        loadCurrentGalleryFilesSorted(currentGalleryId);
         renderFileList();
         if (currentSubPanel === 'foldermanager') renderFolderManager();
         if (currentSubPanel === 'filerename') renderRenamerList();
+        renderImportExportPanel();
     });
 
     container.addEventListener('show', function() {
@@ -8390,9 +11111,3513 @@ function createShowFileListPanel() {
     return container;
 }
 
+function _isPlainObjectLoose(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function buildFifybujBackupSnapshot() {
+    return {
+        settings: Object.assign({}, getDefaultSettings(), loadSettings() || {}),
+        commentTemplates: getCommentTemplatesSafe(),
+        localDicts: getUserDictsRaw()
+    };
+}
+
+function createFifybujBackupPacket(moduleKey, payload) {
+    var packet = {
+        "__fifybuj_backup__": true
+    };
+    if (moduleKey === 'settings') {
+        packet.setting_payload = payload;
+    } else if (moduleKey === 'commentTemplates') {
+        packet.comment_templates_payload = payload;
+    } else if (moduleKey === 'localDicts') {
+        packet.local_dicts_payload = payload;
+    }
+    return packet;
+}
+
+function createFifybujBackupBundle() {
+    var snapshot = buildFifybujBackupSnapshot();
+    return {
+        "__fifybuj_backup__": true,
+        "app": "F-IFYBUJ",
+        "scriptName": "F-IFYBUJ - Auto Create & Upload",
+        "scriptVersion": "9.00",
+        "schemaVersion": 1,
+        "backupType": "bundle",
+        "exportedAt": new Date().toISOString(),
+        "payload": {
+            "settings": snapshot.settings,
+            "commentTemplates": snapshot.commentTemplates,
+            "localDicts": snapshot.localDicts
+        }
+    };
+}
+
+function stringifyFifybujBackupData(data) {
+    return JSON.stringify(data, null, 2);
+}
+
+function createFifybujModuleExportText(moduleKey) {
+    var snapshot = buildFifybujBackupSnapshot();
+    if (moduleKey === 'settings') {
+        return stringifyFifybujBackupData(createFifybujBackupPacket('settings', snapshot.settings));
+    }
+    if (moduleKey === 'commentTemplates') {
+        return stringifyFifybujBackupData(createFifybujBackupPacket('commentTemplates', snapshot.commentTemplates));
+    }
+    if (moduleKey === 'localDicts') {
+        return stringifyFifybujBackupData(createFifybujBackupPacket('localDicts', snapshot.localDicts));
+    }
+    return '';
+}
+
+function createFifybujAllExportText() {
+    return [
+        createFifybujModuleExportText('settings'),
+        createFifybujModuleExportText('commentTemplates'),
+        createFifybujModuleExportText('localDicts')
+    ].filter(function(item) {
+        return !!item;
+    }).join('\n\n');
+}
+
+function extractFifybujJsonObjectsFromText(text) {
+    text = String(text || '');
+    var results = [];
+    var i = 0;
+
+    while (i < text.length) {
+        while (i < text.length && /\s/.test(text.charAt(i))) i++;
+        if (i >= text.length) break;
+
+        if (text.charAt(i) !== '{') {
+            i++;
+            continue;
+        }
+
+        var start = i;
+        var depth = 0;
+        var inString = false;
+        var escaped = false;
+        var completed = false;
+
+        for (; i < text.length; i++) {
+            var ch = text.charAt(i);
+
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                    continue;
+                }
+                if (ch === '\\') {
+                    escaped = true;
+                    continue;
+                }
+                if (ch === '"') {
+                    inString = false;
+                }
+                continue;
+            }
+
+            if (ch === '"') {
+                inString = true;
+                continue;
+            }
+            if (ch === '{') {
+                depth++;
+                continue;
+            }
+            if (ch === '}') {
+                depth--;
+                if (depth === 0) {
+                    var chunk = text.slice(start, i + 1);
+                    try {
+                        results.push(JSON.parse(chunk));
+                    } catch (e) {}
+                    i++;
+                    completed = true;
+                    break;
+                }
+            }
+        }
+
+        if (!completed) break;
+    }
+
+    return results;
+}
+
+function isFifybujBackupPacket(packet) {
+    return !!(
+        _isPlainObjectLoose(packet) &&
+        packet.__fifybuj_backup__ === true
+    );
+}
+
+function collectFifybujBackupPacketsFromText(text) {
+    return extractFifybujJsonObjectsFromText(text).filter(isFifybujBackupPacket);
+}
+
+function getFifybujModulePayloadsFromText(text, moduleKey) {
+    var packets = collectFifybujBackupPacketsFromText(text);
+    var payloads = [];
+
+    packets.forEach(function(packet) {
+        if (moduleKey === 'settings') {
+            if (Object.prototype.hasOwnProperty.call(packet, 'setting_payload')) {
+                payloads.push(packet.setting_payload);
+                return;
+            }
+            if (packet.backupType === 'module' && packet.module === 'settings') {
+                payloads.push(packet.payload);
+                return;
+            }
+            if (packet.backupType === 'bundle' && _isPlainObjectLoose(packet.payload) && Object.prototype.hasOwnProperty.call(packet.payload, 'settings')) {
+                payloads.push(packet.payload.settings);
+                return;
+            }
+        }
+
+        if (moduleKey === 'commentTemplates') {
+            if (Object.prototype.hasOwnProperty.call(packet, 'comment_templates_payload')) {
+                payloads.push(packet.comment_templates_payload);
+                return;
+            }
+            if (packet.backupType === 'module' && packet.module === 'commentTemplates') {
+                payloads.push(packet.payload);
+                return;
+            }
+            if (packet.backupType === 'bundle' && _isPlainObjectLoose(packet.payload) && Object.prototype.hasOwnProperty.call(packet.payload, 'commentTemplates')) {
+                payloads.push(packet.payload.commentTemplates);
+                return;
+            }
+        }
+
+        if (moduleKey === 'localDicts') {
+            if (Object.prototype.hasOwnProperty.call(packet, 'local_dicts_payload')) {
+                payloads.push(packet.local_dicts_payload);
+                return;
+            }
+            if (packet.backupType === 'module' && packet.module === 'localDicts') {
+                payloads.push(packet.payload);
+                return;
+            }
+            if (packet.backupType === 'bundle' && _isPlainObjectLoose(packet.payload) && Object.prototype.hasOwnProperty.call(packet.payload, 'localDicts')) {
+                payloads.push(packet.payload.localDicts);
+            }
+        }
+    });
+
+    return payloads;
+}
+
+function getLatestFifybujModulePayloadFromText(text, moduleKey) {
+    var payloads = getFifybujModulePayloadsFromText(text, moduleKey);
+    return payloads.length ? payloads[payloads.length - 1] : null;
+}
+
+function importSettingsBackupPayload(payload) {
+    if (!_isPlainObjectLoose(payload)) return false;
+    saveSettings(Object.assign({}, getDefaultSettings(), payload || {}));
+    return true;
+}
+
+function importCommentTemplatesBackupPayload(payload) {
+    if (!Array.isArray(payload)) return false;
+    saveCommentTemplatesSafe(payload);
+    syncAllCommentTemplateDropdowns();
+    return true;
+}
+
+function importLocalDictsBackupPayload(payload) {
+    if (!_isPlainObjectLoose(payload)) return false;
+    setUserDictsRaw(payload);
+    refreshOpenDictManagerPanelIfOpen();
+    return true;
+}
+
+function importFifybujModuleFromText(moduleKey, text) {
+    var payload = getLatestFifybujModulePayloadFromText(text, moduleKey);
+    if (payload == null) return false;
+
+    if (moduleKey === 'settings') return importSettingsBackupPayload(payload);
+    if (moduleKey === 'commentTemplates') return importCommentTemplatesBackupPayload(payload);
+    if (moduleKey === 'localDicts') return importLocalDictsBackupPayload(payload);
+
+    return false;
+}
+
+function importAllFifybujBackupFromText(text) {
+    var packets = collectFifybujBackupPacketsFromText(text);
+    var status = {
+        settings: false,
+        commentTemplates: false,
+        localDicts: false
+    };
+
+    packets.forEach(function(packet) {
+        if (Object.prototype.hasOwnProperty.call(packet, 'setting_payload')) {
+            status.settings = importSettingsBackupPayload(packet.setting_payload) || status.settings;
+        }
+        if (Object.prototype.hasOwnProperty.call(packet, 'comment_templates_payload')) {
+            status.commentTemplates = importCommentTemplatesBackupPayload(packet.comment_templates_payload) || status.commentTemplates;
+        }
+        if (Object.prototype.hasOwnProperty.call(packet, 'local_dicts_payload')) {
+            status.localDicts = importLocalDictsBackupPayload(packet.local_dicts_payload) || status.localDicts;
+        }
+
+        if (packet.backupType === 'bundle' && _isPlainObjectLoose(packet.payload)) {
+            if (Object.prototype.hasOwnProperty.call(packet.payload, 'settings')) {
+                status.settings = importSettingsBackupPayload(packet.payload.settings) || status.settings;
+            }
+            if (Object.prototype.hasOwnProperty.call(packet.payload, 'commentTemplates')) {
+                status.commentTemplates = importCommentTemplatesBackupPayload(packet.payload.commentTemplates) || status.commentTemplates;
+            }
+            if (Object.prototype.hasOwnProperty.call(packet.payload, 'localDicts')) {
+                status.localDicts = importLocalDictsBackupPayload(packet.payload.localDicts) || status.localDicts;
+            }
+            return;
+        }
+
+        if (packet.backupType === 'module') {
+            if (packet.module === 'settings') {
+                status.settings = importSettingsBackupPayload(packet.payload) || status.settings;
+            } else if (packet.module === 'commentTemplates') {
+                status.commentTemplates = importCommentTemplatesBackupPayload(packet.payload) || status.commentTemplates;
+            } else if (packet.module === 'localDicts') {
+                status.localDicts = importLocalDictsBackupPayload(packet.payload) || status.localDicts;
+            }
+        }
+    });
+
+    return status;
+}
+
 // ==================== Setting 面板 ====================
 
+function _getEnhancedSettingPanelColors(panel) {
+    var fg = '#5C0D12';
+    var bg = '#E0DED3';
+    try {
+        bg = getComputedStyle(panel).backgroundColor || bg;
+    } catch (e) {}
+    try {
+        fg = getComputedStyle(panel.querySelector('div') || panel).color || fg;
+    } catch (e2) {}
+    if (!fg || fg === 'rgba(0, 0, 0, 0)' || fg === 'transparent') fg = '#5C0D12';
+    if (!bg || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') bg = '#E0DED3';
+    return { fg: fg, bg: bg };
+}
+
+function _styleEnhancedSettingOutlineButton(btn, colors, extraCss) {
+    if (!btn) return btn;
+    btn.style.cssText =
+        'height: 26px;' +
+        'padding: 0 12px;' +
+        'box-sizing: border-box;' +
+        'border: 1px solid ' + colors.fg + ';' +
+        'border-radius: 2px;' +
+        'cursor: pointer;' +
+        'font-size: 9pt;' +
+        'font-weight: bold;' +
+        'line-height: 24px;' +
+        'box-shadow: none;' +
+        'background: transparent;' +
+        'color: ' + colors.fg + ';' +
+        (extraCss || '');
+    return btn;
+}
+
+function _flashEnhancedSettingJsonArea(textarea, ok) {
+    if (!textarea) return;
+    var oldBorderColor = textarea.style.borderColor;
+    var oldColor = textarea.style.color;
+    textarea.style.borderColor = ok ? '#007700' : '#CC0000';
+    textarea.style.color = ok ? '#007700' : '#CC0000';
+    setTimeout(function() {
+        textarea.style.borderColor = oldBorderColor;
+        textarea.style.color = oldColor;
+    }, 1200);
+}
+
+function _showEnhancedImportConfirmDialog(message, onConfirm) {
+    var overlay = document.createElement('div');
+    overlay.style.cssText =
+        'position: fixed;' +
+        'inset: 0;' +
+        'background: rgba(0,0,0,0.45);' +
+        'z-index: 999999;' +
+        'display: flex;' +
+        'align-items: center;' +
+        'justify-content: center;';
+
+    var box = document.createElement('div');
+    box.style.cssText =
+        'width: 360px;' +
+        'max-width: calc(100vw - 24px);' +
+        'background: #E0DED3;' +
+        'border: 1px solid #5C0D12;' +
+        'border-radius: 2px;' +
+        'padding: 12px;' +
+        'box-sizing: border-box;';
+
+    var title = document.createElement('div');
+    title.textContent = '確認導入';
+    title.style.cssText =
+        'font-size: 10pt;' +
+        'font-weight: bold;' +
+        'color: #5C0D12;' +
+        'margin-bottom: 8px;';
+
+    var content = document.createElement('div');
+    content.textContent = message || '確認要執行導入嗎？';
+    content.style.cssText =
+        'font-size: 9pt;' +
+        'color: #5C0D12;' +
+        'line-height: 1.5;' +
+        'margin-bottom: 10px;';
+
+    var hint = document.createElement('div');
+    hint.textContent = '按 Enter 確認，按 Esc 取消';
+    hint.style.cssText =
+        'font-size: 8.5pt;' +
+        'color: #5C0D12;' +
+        'margin-bottom: 10px;';
+
+    var btnRow = document.createElement('div');
+    btnRow.style.cssText =
+        'display: flex;' +
+        'align-items: center;' +
+        'justify-content: flex-end;' +
+        'gap: 8px;';
+
+    var cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = '取消';
+    cancelBtn.style.cssText =
+        'height: 26px;' +
+        'padding: 0 12px;' +
+        'box-sizing: border-box;' +
+        'border: 1px solid #5C0D12;' +
+        'border-radius: 2px;' +
+        'cursor: pointer;' +
+        'font-size: 9pt;' +
+        'font-weight: bold;' +
+        'line-height: 24px;' +
+        'background: transparent;' +
+        'color: #5C0D12;';
+
+    var confirmBtn = document.createElement('button');
+    confirmBtn.type = 'button';
+    confirmBtn.textContent = '確認';
+    confirmBtn.style.cssText =
+        'height: 26px;' +
+        'padding: 0 12px;' +
+        'box-sizing: border-box;' +
+        'border: 1px solid #5C0D12;' +
+        'border-radius: 2px;' +
+        'cursor: pointer;' +
+        'font-size: 9pt;' +
+        'font-weight: bold;' +
+        'line-height: 24px;' +
+        'background: transparent;' +
+        'color: #5C0D12;';
+
+    function closeDialog() {
+        document.removeEventListener('keydown', onKeyDown, true);
+        if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    }
+
+    function confirmAction() {
+        closeDialog();
+        if (typeof onConfirm === 'function') onConfirm();
+    }
+
+    function onKeyDown(e) {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            closeDialog();
+        } else if (e.key === 'Enter') {
+            e.preventDefault();
+            confirmAction();
+        }
+    }
+
+    cancelBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        closeDialog();
+    });
+
+    confirmBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        confirmAction();
+    });
+
+    overlay.addEventListener('click', function(e) {
+        if (e.target === overlay) closeDialog();
+    });
+
+    btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(confirmBtn);
+    box.appendChild(title);
+    box.appendChild(content);
+    box.appendChild(hint);
+    box.appendChild(btnRow);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onKeyDown, true);
+    setTimeout(function() {
+        confirmBtn.focus();
+    }, 0);
+}
+
+function _parseEnhancedSettingInt(value, fallback) {
+    var parsed = parseInt(value, 10);
+    return isNaN(parsed) ? fallback : parsed;
+}
+
+function _enhancedEnsureColorPreviewForInput(input) {
+    if (!input || input.__enhancedColorPreviewAttached) return;
+
+    function rgbTextToHex(rgbText) {
+        var normalized = _normalizeConfirmFeedbackColorCode(rgbText, '');
+        if (!normalized) return '';
+        var parts = normalized.split(',');
+        var r = parseInt(parts[0], 10);
+        var g = parseInt(parts[1], 10);
+        var b = parseInt(parts[2], 10);
+
+        function toHex(v) {
+            var h = v.toString(16).toUpperCase();
+            return h.length === 1 ? '0' + h : h;
+        }
+
+        return '#' + toHex(r) + toHex(g) + toHex(b);
+    }
+
+    function hexToRgbText(hex) {
+        var m = String(hex || '').trim().match(/^#([0-9a-fA-F]{6})$/);
+        if (!m) return '';
+        var n = m[1];
+        var r = parseInt(n.slice(0, 2), 16);
+        var g = parseInt(n.slice(2, 4), 16);
+        var b = parseInt(n.slice(4, 6), 16);
+        return r + ',' + g + ',' + b;
+    }
+
+    var picker = document.createElement('input');
+    picker.type = 'color';
+    picker.value = '#00FF00';
+    picker.style.cssText =
+        'width: 28px;' +
+        'height: 24px;' +
+        'margin-left: 6px;' +
+        'padding: 0;' +
+        'border: none;' +
+        'outline: none;' +
+        'box-shadow: none;' +
+        'box-sizing: border-box;' +
+        'vertical-align: middle;' +
+        'background: transparent;' +
+        'cursor: pointer;' +
+        'flex-shrink: 0;';
+
+    function updatePickerFromText() {
+        var normalized = _normalizeConfirmFeedbackColorCode(input.value, '');
+        if (normalized) {
+            input.value = normalized;
+            var hex = rgbTextToHex(normalized);
+            if (hex) picker.value = hex;
+            picker.style.opacity = '1';
+        } else {
+            picker.style.opacity = '0.45';
+        }
+    }
+
+    function normalizeOnBlur() {
+        var normalized = _normalizeConfirmFeedbackColorCode(input.value, '');
+        if (normalized) input.value = normalized;
+        updatePickerFromText();
+    }
+
+    function onPickerChange() {
+        var rgbText = hexToRgbText(picker.value);
+        if (rgbText) {
+            input.value = rgbText;
+            picker.style.opacity = '1';
+        }
+    }
+
+    input.__updateColorPreview = updatePickerFromText;
+    input.addEventListener('input', updatePickerFromText);
+    input.addEventListener('change', updatePickerFromText);
+    input.addEventListener('blur', normalizeOnBlur);
+
+    picker.addEventListener('input', onPickerChange);
+    picker.addEventListener('change', onPickerChange);
+
+    if (input.parentNode) {
+        if (input.nextSibling) input.parentNode.insertBefore(picker, input.nextSibling);
+        else input.parentNode.appendChild(picker);
+    }
+
+    input.__enhancedColorPreviewAttached = true;
+    updatePickerFromText();
+}
+
+function _collectEnhancedPriorityOrder(priorityTable) {
+    var labelToKey = {
+        'MTL': 'mtl',
+        'Digital/DL版': 'digital',
+        'Decensored/無修正': 'decensored',
+        'Colorized/カラー化': 'colorized',
+        'Textless/無字': 'textless',
+        'Sample/見本': 'sample',
+        'AI Generated/AI生成': 'aiGenerated',
+        'Ongoing/進行中': 'ongoing',
+        'Incomplete/ページ欠落': 'incomplete'
+    };
+    var out = {};
+    Array.prototype.slice.call((priorityTable && priorityTable.children) || []).forEach(function(row, index) {
+        var spans = row.querySelectorAll('span');
+        if (spans.length < 2) return;
+        var key = labelToKey[String(spans[1].textContent || '').trim()];
+        if (key) out[key] = index + 1;
+    });
+    return out;
+}
+
+function _collectEnhancedSettingValues(panel) {
+    var refs = panel && panel.__enhancedSettingRefs;
+    if (!refs) return Object.assign({}, getDefaultSettings(), getCurrentSettingsSafe());
+
+    var defaults = getDefaultSettings();
+    var current = getCurrentSettingsSafe();
+    var priorities = Object.assign(
+        {},
+        defaults.optionPriorities || {},
+        (current && current.optionPriorities) || {},
+        _collectEnhancedPriorityOrder(refs.priorityTable)
+    );
+
+    var authorizedFolders = [];
+
+    if (refs.authorizedFoldersManager && typeof refs.authorizedFoldersManager.getEntriesForSave === 'function') {
+        var managerEntries = refs.authorizedFoldersManager.getEntriesForSave();
+        authorizedFolders = normalizeAuthorizedFolderSettingsList(managerEntries.map(function(entry) {
+            return {
+                id: entry.id,
+                label: entry.label
+            };
+        }));
+    } else {
+        authorizedFolders = normalizeAuthorizedFolderSettingsList((current && current.customAuthorizedFolders) || []);
+    }
+
+    var result = Object.assign({}, defaults, current, {
+        customRootFolder: authorizedFolders.length === 1 ? authorizedFolders[0].label : '',
+        customAuthorizedFolders: authorizedFolders,
+        retryCount: refs.retryInput ? _parseEnhancedSettingInt(refs.retryInput.value, 3) : 3,
+        translatedDefaultMTL: !!(refs.interfaceInputs[0] && refs.interfaceInputs[0].checked),
+        nonJapaneseDefaultTranslated: !!(refs.interfaceInputs[1] && refs.interfaceInputs[1].checked),
+        japaneseDefaultOfficialTextless: !!(refs.interfaceInputs[2] && refs.interfaceInputs[2].checked),
+        japaneseDefaultAIGenerated: refs.aiGeneratedDefaultInput ? !!refs.aiGeneratedDefaultInput.checked : ((current && current.japaneseDefaultAIGenerated) !== false),
+        deleteDoubleConfirm: !!(refs.interfaceInputs[3] && refs.interfaceInputs[3].checked),
+        confirmBtnColorChange: !!(refs.interfaceInputs[4] && refs.interfaceInputs[4].checked),
+        doubleConfirmMs: refs.interfaceInputs[5] ? _parseEnhancedSettingInt(refs.interfaceInputs[5].value, 1000) : 1000,
+        confirmBtnColorMs: refs.interfaceInputs[6] ? _parseEnhancedSettingInt(refs.interfaceInputs[6].value, 1000) : 1000,
+        confirmBtnSuccessColor: refs.interfaceInputs[7] ? _normalizeConfirmFeedbackColorCode(refs.interfaceInputs[7].value, '0,255,0') : '0,255,0',
+        confirmBtnErrorColor: refs.interfaceInputs[8] ? _normalizeConfirmFeedbackColorCode(refs.interfaceInputs[8].value, '255,0,0') : '255,0,0',
+        doubleConfirmColor: refs.interfaceInputs[9] ? _normalizeConfirmFeedbackColorCode(refs.interfaceInputs[9].value, '255,0,0') : '255,0,0',
+        previewMaxWidth: refs.interfaceInputs[10] ? _parseEnhancedSettingInt(refs.interfaceInputs[10].value, 800) : 800,
+        previewMaxHeight: refs.interfaceInputs[11] ? _parseEnhancedSettingInt(refs.interfaceInputs[11].value, 800) : 800,
+        galleryFolderManagerCopyWithExtension: !!(refs.galleryFolderManagerInputs[0] && refs.galleryFolderManagerInputs[0].checked),
+        autoSwitchDictDropdown: !!(refs.dictInputs[0] && refs.dictInputs[0].checked),
+        dictPriorityPadLength: refs.dictInputs[1] ? _parseEnhancedSettingInt(refs.dictInputs[1].value, 5) : 5,
+        showDebugLogsInBrowserConsole: !!(refs.debugInputs[0] && refs.debugInputs[0].checked),
+        logToBrowserConsole: !!(refs.debugInputs[1] && refs.debugInputs[1].checked),
+        optionPriorities: priorities
+    });
+
+    delete result.defaultAuthorizedFolderId;
+    return result;
+}
+
+function _syncEnhancedSettingControlsFromStorage(panel) {
+    var refs = panel && panel.__enhancedSettingRefs;
+    if (!refs) return;
+    var settings = migrateAuthorizedFolderSettings(Object.assign({}, getDefaultSettings(), loadSettings() || {}));
+
+    if (refs.rootInput) refs.rootInput.value = settings.customRootFolder || '';
+    if (refs.retryInput) refs.retryInput.value = settings.retryCount || 3;
+
+    if (refs.interfaceInputs[0]) refs.interfaceInputs[0].checked = !!settings.translatedDefaultMTL;
+    if (refs.interfaceInputs[1]) refs.interfaceInputs[1].checked = !!settings.nonJapaneseDefaultTranslated;
+    if (refs.interfaceInputs[2]) refs.interfaceInputs[2].checked = !!settings.japaneseDefaultOfficialTextless;
+    if (refs.aiGeneratedDefaultInput) refs.aiGeneratedDefaultInput.checked = settings.japaneseDefaultAIGenerated !== false;
+    if (refs.interfaceInputs[3]) refs.interfaceInputs[3].checked = !!settings.deleteDoubleConfirm;
+    if (refs.interfaceInputs[4]) refs.interfaceInputs[4].checked = settings.confirmBtnColorChange !== false;
+    if (refs.interfaceInputs[5]) refs.interfaceInputs[5].value = settings.doubleConfirmMs || 1000;
+    if (refs.interfaceInputs[6]) refs.interfaceInputs[6].value = settings.confirmBtnColorMs || 1000;
+    if (refs.interfaceInputs[7]) refs.interfaceInputs[7].value = _normalizeConfirmFeedbackColorCode(settings.confirmBtnSuccessColor, '0,255,0');
+    if (refs.interfaceInputs[8]) refs.interfaceInputs[8].value = _normalizeConfirmFeedbackColorCode(settings.confirmBtnErrorColor, '255,0,0');
+    if (refs.interfaceInputs[9]) refs.interfaceInputs[9].value = _normalizeConfirmFeedbackColorCode(settings.doubleConfirmColor, '255,0,0');
+    if (refs.interfaceInputs[10]) refs.interfaceInputs[10].value = settings.previewMaxWidth || 800;
+    if (refs.interfaceInputs[11]) refs.interfaceInputs[11].value = settings.previewMaxHeight || 800;
+
+    if (refs.galleryFolderManagerInputs[0]) refs.galleryFolderManagerInputs[0].checked = settings.galleryFolderManagerCopyWithExtension !== false;
+
+    if (refs.dictInputs[0]) refs.dictInputs[0].checked = settings.autoSwitchDictDropdown !== false;
+    if (refs.dictInputs[1]) refs.dictInputs[1].value = settings.dictPriorityPadLength || 5;
+
+    if (refs.debugInputs[0]) refs.debugInputs[0].checked = !!settings.showDebugLogsInBrowserConsole;
+    if (refs.debugInputs[1]) refs.debugInputs[1].checked = !!settings.logToBrowserConsole;
+
+    if (refs.authorizedFoldersManager) {
+        refs.authorizedFoldersManager.setLoading('讀取授權文件夾中...');
+        getAuthorizedRootEntriesDetailed().then(function(entries) {
+            if (!panel.__enhancedSettingRefs || !panel.__enhancedSettingRefs.authorizedFoldersManager) return;
+            panel.__enhancedSettingRefs.authorizedFoldersManager.setEntries(entries);
+        }).catch(function() {
+            if (!panel.__enhancedSettingRefs || !panel.__enhancedSettingRefs.authorizedFoldersManager) return;
+            panel.__enhancedSettingRefs.authorizedFoldersManager.setEntries((settings.customAuthorizedFolders || []).map(function(entry) {
+                return {
+                    id: entry.id,
+                    label: entry.label,
+                    handle: null,
+                    status: 'missing',
+                    statusText: '未授權'
+                };
+            }));
+            panel.__enhancedSettingRefs.authorizedFoldersManager.setNote('讀取授權文件夾失敗', true);
+        });
+    }
+
+    if (refs.interfaceInputs[7]) {
+        _enhancedEnsureColorPreviewForInput(refs.interfaceInputs[7]);
+        if (typeof refs.interfaceInputs[7].__updateColorPreview === 'function') refs.interfaceInputs[7].__updateColorPreview();
+    }
+    if (refs.interfaceInputs[8]) {
+        _enhancedEnsureColorPreviewForInput(refs.interfaceInputs[8]);
+        if (typeof refs.interfaceInputs[8].__updateColorPreview === 'function') refs.interfaceInputs[8].__updateColorPreview();
+    }
+    if (refs.interfaceInputs[9]) {
+        _enhancedEnsureColorPreviewForInput(refs.interfaceInputs[9]);
+        if (typeof refs.interfaceInputs[9].__updateColorPreview === 'function') refs.interfaceInputs[9].__updateColorPreview();
+    }
+
+    if (refs.priorityTable) {
+        var keyToLabel = {
+            mtl: 'MTL',
+            digital: 'Digital/DL版',
+            decensored: 'Decensored/無修正',
+            colorized: 'Colorized/カラー化',
+            textless: 'Textless/無字',
+            sample: 'Sample/見本',
+            aiGenerated: 'AI Generated/AI生成',
+            ongoing: 'Ongoing/進行中',
+            incomplete: 'Incomplete/ページ欠落'
+        };
+        var rowMap = {};
+        Array.prototype.slice.call(refs.priorityTable.children || []).forEach(function(row) {
+            var spans = row.querySelectorAll('span');
+            if (spans.length < 2) return;
+            rowMap[String(spans[1].textContent || '').trim()] = row;
+        });
+
+        Object.keys(keyToLabel).sort(function(a, b) {
+            var pa = ((settings.optionPriorities || {})[a] || 99);
+            var pb = ((settings.optionPriorities || {})[b] || 99);
+            return pa - pb;
+        }).forEach(function(key) {
+            var row = rowMap[keyToLabel[key]];
+            if (row) refs.priorityTable.appendChild(row);
+        });
+
+        Array.prototype.slice.call(refs.priorityTable.children || []).forEach(function(row, index) {
+            var spans = row.querySelectorAll('span');
+            if (spans.length > 0) spans[0].textContent = String(index + 1);
+        });
+    }
+}
+
+function _enhancedFindSettingControlRow(templateInput) {
+    if (!templateInput) return null;
+    if (templateInput.closest) {
+        var labelRow = templateInput.closest('label');
+        if (labelRow) return labelRow;
+    }
+    return templateInput.parentNode || null;
+}
+
+function _enhancedReplacePrimarySettingRowText(row, labelText) {
+    if (!row) return false;
+    var walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT, null, false);
+    var bestNode = null;
+    var bestText = '';
+    var current = null;
+
+    while ((current = walker.nextNode())) {
+        var text = String(current.nodeValue || '').replace(/\s+/g, ' ').trim();
+        if (!text) continue;
+        if (!bestNode || text.length > bestText.length) {
+            bestNode = current;
+            bestText = text;
+        }
+    }
+
+    if (!bestNode) return false;
+    bestNode.nodeValue = bestNode.nodeValue.replace(bestText, labelText);
+    return true;
+}
+
+function _enhancedInsertSettingControlLike(templateInput, options) {
+    options = options || {};
+
+    var templateRow = _enhancedFindSettingControlRow(templateInput);
+    if (!templateRow || !templateRow.parentNode) return null;
+
+    var anchorInput = options.insertAfterInput || templateInput;
+    var anchorRow = _enhancedFindSettingControlRow(anchorInput) || templateRow;
+
+    var clonedRow = templateRow.cloneNode(true);
+    var clonedInputs = Array.prototype.slice.call(clonedRow.querySelectorAll('input') || []);
+    if (!clonedInputs.length) return null;
+
+    clonedInputs.forEach(function(input) {
+        input.removeAttribute('id');
+        input.removeAttribute('name');
+        if (input.type === 'checkbox' || input.type === 'radio') {
+            input.checked = false;
+        } else {
+            input.value = '';
+        }
+    });
+
+    var clonedInput = clonedInputs[0];
+    if (!clonedInput) return null;
+
+    if (options.inputType) {
+        clonedInput.type = options.inputType;
+    }
+
+    if (clonedInput.type === 'checkbox' || clonedInput.type === 'radio') {
+        clonedInput.checked = !!options.checked;
+    } else if (Object.prototype.hasOwnProperty.call(options, 'value')) {
+        clonedInput.value = options.value == null ? '' : String(options.value);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(options, 'labelText')) {
+        _enhancedReplacePrimarySettingRowText(clonedRow, options.labelText);
+    }
+
+    if (anchorRow.nextSibling) {
+        anchorRow.parentNode.insertBefore(clonedRow, anchorRow.nextSibling);
+    } else {
+        anchorRow.parentNode.appendChild(clonedRow);
+    }
+
+    return clonedInput;
+}
+
+function _enhancedSettingsGetJapaneseAIGeneratedDefaultEnabled() {
+    var settings = Object.assign({}, getDefaultSettings(), loadSettings() || {});
+    return settings.japaneseDefaultAIGenerated !== false;
+}
+
+function _enhancedNormalizeNodeText(node) {
+    return String((node && node.textContent) || '').replace(/\s+/g, ' ').trim();
+}
+
+function _enhancedCheckboxText(input) {
+    if (!input) return '';
+    var parts = [];
+    var label = input.closest ? input.closest('label') : null;
+    if (label) parts.push(_enhancedNormalizeNodeText(label));
+    if (input.parentNode) parts.push(_enhancedNormalizeNodeText(input.parentNode));
+    if (input.nextElementSibling) parts.push(_enhancedNormalizeNodeText(input.nextElementSibling));
+    if (input.parentNode && input.parentNode.nextElementSibling) parts.push(_enhancedNormalizeNodeText(input.parentNode.nextElementSibling));
+    return parts.join(' | ');
+}
+
+function _enhancedFindAIGeneratedCheckbox(root) {
+    var list = Array.prototype.slice.call((root || document).querySelectorAll('input[type="checkbox"]') || []);
+    for (var i = 0; i < list.length; i++) {
+        var text = _enhancedCheckboxText(list[i]);
+        if (
+            text.indexOf('AI Generated/AI生成') !== -1 ||
+            text.indexOf('AI Generated') !== -1 ||
+            text.indexOf('AI生成') !== -1
+        ) {
+            return list[i];
+        }
+    }
+    return null;
+}
+
+function _enhancedContainerLooksJapanese(root) {
+    if (!root) return false;
+
+    var selects = Array.prototype.slice.call(root.querySelectorAll('select') || []);
+    for (var i = 0; i < selects.length; i++) {
+        var select = selects[i];
+        var opt = select.options && select.selectedIndex >= 0 ? select.options[select.selectedIndex] : null;
+        var text = String((opt && opt.textContent) || select.value || '').trim();
+        if (/^japanese$/i.test(text) || text.indexOf('日本語') !== -1) return true;
+    }
+
+    var checkedInputs = Array.prototype.slice.call(root.querySelectorAll('input:checked') || []);
+    for (var j = 0; j < checkedInputs.length; j++) {
+        var input = checkedInputs[j];
+        var mix = [
+            String(input.value || ''),
+            _enhancedCheckboxText(input)
+        ].join(' | ');
+        if (/^japanese$/i.test(String(input.value || '').trim()) || /(^|\W)Japanese(\W|$)/i.test(mix) || mix.indexOf('日本語') !== -1) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function _enhancedSetChecked(input, checked) {
+    if (!input || input.checked === checked) return;
+    input.checked = checked;
+    try { input.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+    try { input.dispatchEvent(new Event('change', { bubbles: true })); } catch (e2) {}
+}
+
+function _enhancedTryApplyJapaneseAIGeneratedDefault(target) {
+    if (!_enhancedSettingsGetJapaneseAIGeneratedDefaultEnabled()) return;
+    var root = target && target.closest ? (
+        target.closest('.s[data-custom="true"]') ||
+        target.closest('form') ||
+        target.closest('.s') ||
+        target.closest('section') ||
+        document
+    ) : document;
+
+    if (!root || !_enhancedContainerLooksJapanese(root)) return;
+
+    var aiCheckbox = _enhancedFindAIGeneratedCheckbox(root);
+    if (!aiCheckbox) return;
+
+    _enhancedSetChecked(aiCheckbox, true);
+}
+
+if (!window.__fifybujJapaneseAIGeneratedDefaultInstalled) {
+    window.__fifybujJapaneseAIGeneratedDefaultInstalled = true;
+
+    document.addEventListener('change', function(e) {
+        setTimeout(function() {
+            _enhancedTryApplyJapaneseAIGeneratedDefault(e.target || document);
+        }, 0);
+    }, true);
+
+    document.addEventListener('click', function(e) {
+        setTimeout(function() {
+            _enhancedTryApplyJapaneseAIGeneratedDefault(e.target || document);
+        }, 0);
+    }, true);
+}
+
+function _enhanceSettingPanelWithBackupUI(panel) {
+    if (!panel || panel.__backupEnhanced) return panel;
+
+    var colors = _getEnhancedSettingPanelColors(panel);
+    var shell = panel.children[1];
+    if (!shell || shell.children.length < 2) return panel;
+
+    var sidebar = shell.children[0];
+    var contentWrap = shell.children[1];
+    var contentScroll = contentWrap && contentWrap.children ? contentWrap.children[0] : null;
+    var contentFooter = contentWrap && contentWrap.children ? contentWrap.children[1] : null;
+    if (!sidebar || !contentScroll) return panel;
+
+    var originalPanels = Array.prototype.slice.call(contentScroll.children || []);
+    if (originalPanels.length < 7) return panel;
+
+    var generalPanel = originalPanels[0];
+    var interfacePanel = originalPanels[1];
+    var galleryFolderManagerPanel = originalPanels[2];
+    var dictPanel = originalPanels[3];
+    var priorityPanel = originalPanels[4];
+    var debugPanel = originalPanels[5];
+    var initPanel = originalPanels[6];
+
+    var generalInputs = generalPanel.querySelectorAll('input');
+    var interfaceInputs = interfacePanel.querySelectorAll('input');
+    var galleryFolderManagerInputs = galleryFolderManagerPanel.querySelectorAll('input');
+    var dictInputs = dictPanel.querySelectorAll('input');
+    var debugInputs = debugPanel.querySelectorAll('input');
+    var priorityTable = priorityPanel.lastElementChild;
+
+    panel.__enhancedSettingRefs = {
+        generalPanel: generalPanel,
+        interfacePanel: interfacePanel,
+        galleryFolderManagerPanel: galleryFolderManagerPanel,
+        dictPanel: dictPanel,
+        priorityPanel: priorityPanel,
+        debugPanel: debugPanel,
+        initPanel: initPanel,
+        rootInput: generalInputs[0] || null,
+        retryInput: generalInputs[1] || null,
+        interfaceInputs: interfaceInputs,
+        galleryFolderManagerInputs: galleryFolderManagerInputs,
+        dictInputs: dictInputs,
+        debugInputs: debugInputs,
+        priorityTable: priorityTable,
+        aiGeneratedDefaultInput: null
+    };
+
+    var officialTextlessInput = panel.__enhancedSettingRefs.interfaceInputs[2] || null;
+    if (officialTextlessInput && !panel.__enhancedSettingRefs.aiGeneratedDefaultInput) {
+        panel.__enhancedSettingRefs.aiGeneratedDefaultInput = _enhancedInsertSettingControlLike(
+            officialTextlessInput,
+            {
+                insertAfterInput: officialTextlessInput,
+                inputType: 'checkbox',
+                labelText: '默認勾選AI生成',
+                checked: true
+            }
+        );
+    }
+
+    if (contentFooter) {
+        if (typeof contentFooter.__origDisplay === 'undefined') contentFooter.__origDisplay = contentFooter.style.display || '';
+        if (typeof contentFooter.__origPadding === 'undefined') contentFooter.__origPadding = contentFooter.style.padding || '';
+        if (typeof contentFooter.__origBorderTop === 'undefined') contentFooter.__origBorderTop = contentFooter.style.borderTop || '';
+        if (typeof contentFooter.__origMinHeight === 'undefined') contentFooter.__origMinHeight = contentFooter.style.minHeight || '';
+    }
+
+    var rootRow = panel.__enhancedSettingRefs.rootInput ? _enhancedFindSettingControlRow(panel.__enhancedSettingRefs.rootInput) : null;
+    var authorizedFolderManagerWrapper = document.createElement('div');
+    authorizedFolderManagerWrapper.style.cssText = 'margin-bottom: 10px;';
+
+    var authorizedFolderHeaderRow = document.createElement('div');
+    authorizedFolderHeaderRow.style.cssText = 'display: flex;align-items: center;justify-content: space-between;gap: 8px;margin-bottom: 6px;flex-wrap: wrap;';
+
+    var authorizedFolderTitle = document.createElement('div');
+    authorizedFolderTitle.textContent = '自定義授權文件夾';
+    authorizedFolderTitle.style.cssText = 'font-size: 9pt;font-weight: bold;color: ' + colors.fg + ';';
+
+    var authorizedFolderActions = document.createElement('div');
+    authorizedFolderActions.style.cssText = 'display: flex;align-items: center;gap: 6px;flex-wrap: wrap;';
+
+    var addAuthorizedFolderBtn = document.createElement('button');
+    addAuthorizedFolderBtn.type = 'button';
+    addAuthorizedFolderBtn.textContent = '新增授權文件夾';
+    _styleEnhancedSettingOutlineButton(addAuthorizedFolderBtn, colors);
+
+    var refreshAuthorizedFolderStatusBtn = document.createElement('button');
+    refreshAuthorizedFolderStatusBtn.type = 'button';
+    refreshAuthorizedFolderStatusBtn.textContent = '重新整理狀態';
+    _styleEnhancedSettingOutlineButton(refreshAuthorizedFolderStatusBtn, colors);
+
+    authorizedFolderActions.appendChild(addAuthorizedFolderBtn);
+    authorizedFolderActions.appendChild(refreshAuthorizedFolderStatusBtn);
+    authorizedFolderHeaderRow.appendChild(authorizedFolderTitle);
+    authorizedFolderHeaderRow.appendChild(authorizedFolderActions);
+
+    var authorizedFolderListWrap = document.createElement('div');
+    authorizedFolderListWrap.style.cssText = 'border: 1px solid ' + colors.fg + ';background: transparent;border-radius: 2px;overflow: hidden;';
+
+    var authorizedFolderNote = document.createElement('div');
+    authorizedFolderNote.style.cssText = 'font-size: 8.5pt;color: ' + colors.fg + ';margin-top: 6px;line-height: 1.5;';
+    authorizedFolderNote.textContent = '只允許使用已授權文件夾中的文件夾與 ZIP。';
+
+    authorizedFolderManagerWrapper.appendChild(authorizedFolderHeaderRow);
+    authorizedFolderManagerWrapper.appendChild(authorizedFolderListWrap);
+    authorizedFolderManagerWrapper.appendChild(authorizedFolderNote);
+
+    if (rootRow && rootRow.parentNode) {
+        rootRow.parentNode.replaceChild(authorizedFolderManagerWrapper, rootRow);
+    } else {
+        generalPanel.insertBefore(authorizedFolderManagerWrapper, generalPanel.firstChild ? generalPanel.firstChild.nextSibling : null);
+    }
+
+    function cloneAuthorizedFolderManagerEntries(entries) {
+        return (Array.isArray(entries) ? entries : []).map(function(entry) {
+            return {
+                id: entry.id,
+                label: entry.label,
+                handle: entry.handle || null,
+                status: entry.status || '',
+                statusText: entry.statusText || ''
+            };
+        });
+    }
+
+    function getAuthorizedFolderManager() {
+        return panel.__enhancedSettingRefs.authorizedFoldersManager;
+    }
+
+    function setAuthorizedFolderManagerNote(text, isError) {
+        authorizedFolderNote.textContent = text || '';
+        authorizedFolderNote.style.color = isError ? '#CC0000' : colors.fg;
+    }
+
+    function updateAuthorizedFolderEntryStatus(entry) {
+        if (!entry || !entry.handle || !entry.handle.queryPermission) {
+            entry.status = 'missing';
+            entry.statusText = '未授權';
+            return Promise.resolve(entry);
+        }
+
+        return Promise.resolve().then(function() {
+            return entry.handle.queryPermission({ mode: 'read' });
+        }).then(function(permission) {
+            entry.status = permission === 'granted' ? 'granted' : 'prompt';
+            entry.statusText = permission === 'granted' ? '✓ 已授權' : '未授權';
+            return entry;
+        }).catch(function() {
+            entry.status = 'error';
+            entry.statusText = '已失效';
+            return entry;
+        });
+    }
+
+    function renderAuthorizedFolderManager() {
+        var manager = getAuthorizedFolderManager();
+        if (!manager) return;
+
+        while (authorizedFolderListWrap.firstChild) authorizedFolderListWrap.removeChild(authorizedFolderListWrap.firstChild);
+
+        if (!manager.entries.length) {
+            var emptyRow = document.createElement('div');
+            emptyRow.textContent = '尚未新增授權文件夾';
+            emptyRow.style.cssText = 'padding: 8px 10px;font-size: 9pt;color: ' + colors.fg + ';';
+            authorizedFolderListWrap.appendChild(emptyRow);
+            if (!authorizedFolderNote.textContent) setAuthorizedFolderManagerNote('請先新增至少一個授權文件夾。', false);
+            return;
+        }
+
+        manager.entries.forEach(function(entry, index) {
+            var row = document.createElement('div');
+            row.style.cssText = 'display: flex;align-items: center;gap: 8px;padding: 6px 8px;border-bottom: ' + (index < manager.entries.length - 1 ? ('1px solid ' + colors.fg) : 'none') + ';flex-wrap: wrap;';
+
+            var orderLabel = document.createElement('span');
+            orderLabel.textContent = String(index + 1) + '.';
+            orderLabel.style.cssText = 'width: 22px;min-width: 22px;text-align: right;font-size: 9pt;font-weight: bold;color: ' + colors.fg + ';';
+
+            var labelInput = document.createElement('input');
+            labelInput.type = 'text';
+            labelInput.value = String(entry.label || '');
+            applyTopBarControlStyle(labelInput, '220px', 'flex: 1 1 220px;min-width: 180px;background: transparent;color: ' + colors.fg + ';');
+            labelInput.addEventListener('input', function() {
+                entry.label = labelInput.value;
+            });
+            labelInput.addEventListener('change', function() {
+                entry.label = String(labelInput.value || '').trim() || (entry.handle && entry.handle.name) || ('授權文件夾 ' + (index + 1));
+                labelInput.value = entry.label;
+                setAuthorizedFolderManagerNote('尚未保存授權文件夾變更', false);
+            });
+
+            var statusLabel = document.createElement('span');
+            statusLabel.textContent = entry.statusText || (entry.handle ? '讀取中...' : '未授權');
+            statusLabel.style.cssText = 'font-size: 8.5pt;color: ' + (entry.status === 'error' ? '#CC0000' : colors.fg) + ';white-space: nowrap;';
+
+            var reauthorizeBtn = document.createElement('button');
+            reauthorizeBtn.type = 'button';
+            reauthorizeBtn.textContent = '重新授權';
+            _styleEnhancedSettingOutlineButton(reauthorizeBtn, colors, 'height: 24px;padding: 0 8px;');
+            reauthorizeBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                var pickerHost = null;
+
+                try {
+                    if (typeof unsafeWindow !== 'undefined' && unsafeWindow && typeof unsafeWindow.showDirectoryPicker === 'function') {
+                        pickerHost = unsafeWindow;
+                    }
+                } catch (e) {}
+
+                if (!pickerHost && typeof window.showDirectoryPicker === 'function') {
+                    pickerHost = window;
+                }
+
+                if (!pickerHost) {
+                    setAuthorizedFolderManagerNote('目前瀏覽器不支援授權文件夾選擇', true);
+                    return;
+                }
+
+                Promise.resolve().then(function() {
+                    return pickerHost.showDirectoryPicker.call(pickerHost, { mode: 'read' });
+                }).then(function(handle) {
+                    return Promise.resolve().then(function() {
+                        if (!handle.requestPermission) return 'granted';
+                        return handle.requestPermission({ mode: 'read' });
+                    }).catch(function() {
+                        return 'granted';
+                    }).then(function(permission) {
+                        if (permission && permission !== 'granted') {
+                            setAuthorizedFolderManagerNote('重新授權失敗', true);
+                            return;
+                        }
+                        entry.handle = handle;
+                        entry.label = String(entry.label || '').trim() || handle.name || ('授權文件夾 ' + (index + 1));
+                        return updateAuthorizedFolderEntryStatus(entry).then(function() {
+                            renderAuthorizedFolderManager();
+                            setAuthorizedFolderManagerNote('已更新授權文件夾，請按保存設置', false);
+                        });
+                    });
+                }).catch(function(err) {
+                    if (err && err.name === 'AbortError') return;
+                    setAuthorizedFolderManagerNote('重新授權失敗', true);
+                });
+            });
+
+            var deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
+            deleteBtn.textContent = '刪除';
+            _styleEnhancedSettingOutlineButton(deleteBtn, colors, 'height: 24px;padding: 0 8px;');
+            deleteBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                manager.entries = manager.entries.filter(function(item) {
+                    return item.id !== entry.id;
+                });
+                renderAuthorizedFolderManager();
+                setAuthorizedFolderManagerNote('已移除授權文件夾，請按保存設置', false);
+            });
+
+            row.appendChild(orderLabel);
+            row.appendChild(labelInput);
+            row.appendChild(statusLabel);
+            row.appendChild(reauthorizeBtn);
+            row.appendChild(deleteBtn);
+            authorizedFolderListWrap.appendChild(row);
+        });
+    }
+
+    function refreshAuthorizedFolderManagerStatuses() {
+        var manager = getAuthorizedFolderManager();
+        if (!manager) return Promise.resolve([]);
+        setAuthorizedFolderManagerNote('授權狀態檢查中...', false);
+
+        return Promise.all(manager.entries.map(function(entry) {
+            return updateAuthorizedFolderEntryStatus(entry);
+        })).then(function(results) {
+            manager.entries = cloneAuthorizedFolderManagerEntries(results);
+            renderAuthorizedFolderManager();
+            setAuthorizedFolderManagerNote(results.length ? '已更新授權狀態' : '尚未新增授權文件夾', false);
+            return results;
+        }).catch(function(err) {
+            renderAuthorizedFolderManager();
+            setAuthorizedFolderManagerNote('授權狀態檢查失敗', true);
+            throw err;
+        });
+    }
+
+    var authorizedFolderManager = {
+        entries: [],
+        render: renderAuthorizedFolderManager,
+        refresh: refreshAuthorizedFolderManagerStatuses,
+        setNote: setAuthorizedFolderManagerNote,
+        setLoading: function(text) {
+            while (authorizedFolderListWrap.firstChild) authorizedFolderListWrap.removeChild(authorizedFolderListWrap.firstChild);
+            var loadingRow = document.createElement('div');
+            loadingRow.textContent = text || '讀取中...';
+            loadingRow.style.cssText = 'padding: 8px 10px;font-size: 9pt;color: ' + colors.fg + ';';
+            authorizedFolderListWrap.appendChild(loadingRow);
+            setAuthorizedFolderManagerNote(text || '讀取中...', false);
+        },
+        setEntries: function(entries) {
+            this.entries = cloneAuthorizedFolderManagerEntries(entries);
+            renderAuthorizedFolderManager();
+            setAuthorizedFolderManagerNote(this.entries.length ? '只允許從已授權文件夾內選擇 ZIP 與文件夾。' : '請先新增至少一個授權文件夾。', false);
+        },
+        getEntriesForSave: function() {
+            var source = cloneAuthorizedFolderManagerEntries(this.entries);
+            return source.map(function(entry, index) {
+                return {
+                    id: entry.id,
+                    label: String(entry.label || '').trim() || (entry.handle && entry.handle.name) || ('授權文件夾 ' + (index + 1)),
+                    handle: entry.handle || null,
+                    status: entry.status || '',
+                    statusText: entry.statusText || ''
+                };
+            });
+        }
+    };
+
+    panel.__enhancedSettingRefs.authorizedFoldersManager = authorizedFolderManager;
+    authorizedFolderManager.render();
+
+    addAuthorizedFolderBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+
+        var pickerHost = null;
+
+        try {
+            if (typeof unsafeWindow !== 'undefined' && unsafeWindow && typeof unsafeWindow.showDirectoryPicker === 'function') {
+                pickerHost = unsafeWindow;
+            }
+        } catch (e) {}
+
+        if (!pickerHost && typeof window.showDirectoryPicker === 'function') {
+            pickerHost = window;
+        }
+
+        if (!pickerHost) {
+            setAuthorizedFolderManagerNote('目前瀏覽器不支援授權文件夾選擇', true);
+            return;
+        }
+
+        Promise.resolve().then(function() {
+            return pickerHost.showDirectoryPicker.call(pickerHost, { mode: 'read' });
+        }).then(function(handle) {
+            return Promise.resolve().then(function() {
+                if (!handle.requestPermission) return 'granted';
+                return handle.requestPermission({ mode: 'read' });
+            }).catch(function() {
+                return 'granted';
+            }).then(function(permission) {
+                if (permission && permission !== 'granted') {
+                    setAuthorizedFolderManagerNote('授權文件夾未授權成功', true);
+                    return;
+                }
+
+                return Promise.all(authorizedFolderManager.entries.map(function(entry) {
+                    if (!entry.handle || !entry.handle.isSameEntry) return Promise.resolve(false);
+                    return Promise.resolve(entry.handle.isSameEntry(handle)).catch(function() {
+                        return false;
+                    });
+                })).then(function(matches) {
+                    var existingIndex = matches.indexOf(true);
+
+                    if (existingIndex >= 0) {
+                        authorizedFolderManager.entries[existingIndex].handle = handle;
+                        authorizedFolderManager.entries[existingIndex].label = String(authorizedFolderManager.entries[existingIndex].label || '').trim() || handle.name || ('授權文件夾 ' + (existingIndex + 1));
+                    } else {
+                        authorizedFolderManager.entries.push({
+                            id: _generateAuthorizedFolderId(),
+                            label: handle.name || ('授權文件夾 ' + (authorizedFolderManager.entries.length + 1)),
+                            handle: handle,
+                            status: 'granted',
+                            statusText: '✓ 已授權'
+                        });
+                    }
+
+                    return refreshAuthorizedFolderManagerStatuses().catch(function() {
+                        renderAuthorizedFolderManager();
+                    }).then(function() {
+                        setAuthorizedFolderManagerNote('已新增授權文件夾，請按保存設置', false);
+                    });
+                });
+            });
+        }).catch(function(err) {
+            if (err && err.name === 'AbortError') return;
+            setAuthorizedFolderManagerNote('新增授權文件夾失敗', true);
+        });
+    });
+
+    refreshAuthorizedFolderStatusBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        refreshAuthorizedFolderManagerStatuses().catch(function() {
+            return null;
+        });
+    });
+
+    function persistSilently() {
+        saveSettings(_collectEnhancedSettingValues(panel));
+    }
+
+    var autosaveInputs = [
+        panel.__enhancedSettingRefs.retryInput,
+        interfaceInputs[0], interfaceInputs[1], interfaceInputs[2], panel.__enhancedSettingRefs.aiGeneratedDefaultInput, interfaceInputs[3], interfaceInputs[4],
+        interfaceInputs[5], interfaceInputs[6], interfaceInputs[7], interfaceInputs[8], interfaceInputs[9], interfaceInputs[10], interfaceInputs[11],
+        panel.__enhancedSettingRefs.galleryFolderManagerInputs[0],
+        dictInputs[0], dictInputs[1],
+        debugInputs[0], debugInputs[1]
+    ];
+
+    autosaveInputs.forEach(function(input) {
+        if (!input) return;
+        input.addEventListener('change', persistSilently);
+    });
+
+    if (priorityTable) {
+        priorityTable.addEventListener('click', function(e) {
+            if (!e.target || e.target.tagName !== 'BUTTON') return;
+            setTimeout(persistSilently, 0);
+        });
+    }
+
+    var footerSaveBtn = contentFooter ? contentFooter.querySelector('button') : null;
+    if (footerSaveBtn && footerSaveBtn.parentNode) {
+        var replacedFooterSaveBtn = footerSaveBtn.cloneNode(true);
+        footerSaveBtn.parentNode.replaceChild(replacedFooterSaveBtn, footerSaveBtn);
+        footerSaveBtn = replacedFooterSaveBtn;
+
+        footerSaveBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+
+            var collectedSettings = _collectEnhancedSettingValues(panel);
+
+            persistAuthorizedRootEntries(authorizedFolderManager.getEntriesForSave(), collectedSettings).then(function() {
+                _syncEnhancedSettingControlsFromStorage(panel);
+                setAuthorizedFolderManagerNote('已保存授權文件夾設定', false);
+                flashButtonSavedState(footerSaveBtn, '已保存 ✓', '保存設置', 1500);
+            }).catch(function(err) {
+                errorLog('Settings', '保存授權文件夾失敗', err && (err.message || err));
+                setAuthorizedFolderManagerNote('保存授權文件夾失敗', true);
+                flashButtonErrorState(footerSaveBtn, 'Fail', '保存設置', 1000);
+            });
+        });
+    }
+
+    var backupPanel = document.createElement('div');
+    backupPanel.style.cssText = 'display: none;';
+
+    var backupTitle = document.createElement('div');
+    backupTitle.textContent = '備份與還原';
+    backupTitle.style.cssText =
+        'font-size: 10pt;' +
+        'font-weight: bold;' +
+        'color: ' + colors.fg + ';' +
+        'padding-bottom: 6px;' +
+        'margin-bottom: 10px;' +
+        'border-bottom: 1px solid ' + colors.fg + ';';
+    backupPanel.appendChild(backupTitle);
+
+    var backupRowsWrap = document.createElement('div');
+    backupRowsWrap.style.cssText =
+        'display: flex;' +
+        'flex-direction: column;' +
+        'gap: 8px;' +
+        'margin-bottom: 12px;';
+
+    var jsonHeaderRow = document.createElement('div');
+    jsonHeaderRow.style.cssText =
+        'display: flex;' +
+        'align-items: center;' +
+        'justify-content: flex-start;' +
+        'gap: 8px;' +
+        'flex-wrap: wrap;' +
+        'margin: 6px 0;';
+
+    var jsonTitle = document.createElement('div');
+    jsonTitle.textContent = 'JSON導出/導入區';
+    jsonTitle.style.cssText =
+        'display: inline-block;' +
+        'width: 180px;' +
+        'min-width: 180px;' +
+        'font-size: 9pt;' +
+        'font-weight: bold;' +
+        'color: ' + colors.fg + ';' +
+        'white-space: nowrap;';
+
+    var jsonActionRow = document.createElement('div');
+    jsonActionRow.style.cssText =
+        'display: flex;' +
+        'align-items: center;' +
+        'justify-content: flex-start;' +
+        'gap: 8px;' +
+        'flex-wrap: wrap;';
+
+    jsonHeaderRow.appendChild(jsonTitle);
+    jsonHeaderRow.appendChild(jsonActionRow);
+    backupPanel.appendChild(backupRowsWrap);
+    backupPanel.appendChild(jsonHeaderRow);
+
+    var jsonArea = document.createElement('textarea');
+    jsonArea.rows = 10;
+    jsonArea.style.cssText =
+        'width: 100%;' +
+        'height: 180px;' +
+        'min-height: 180px;' +
+        'max-height: 180px;' +
+        'box-sizing: border-box;' +
+        'border: 1px solid ' + colors.fg + ';' +
+        'background: transparent;' +
+        'color: ' + colors.fg + ';' +
+        'font-size: 9pt;' +
+        'padding: 6px;' +
+        'border-radius: 2px;' +
+        'outline: none;' +
+        'resize: none;' +
+        'overflow-x: auto;' +
+        'overflow-y: auto;' +
+        'line-height: 1.4;' +
+        'white-space: pre;' +
+        'word-break: normal;';
+    function adjustJsonAreaHeight() {
+        jsonArea.style.height = '180px';
+        jsonArea.style.minHeight = '180px';
+        jsonArea.style.maxHeight = '180px';
+        jsonArea.style.overflowX = 'auto';
+        jsonArea.style.overflowY = 'auto';
+    }
+    jsonArea.addEventListener('input', adjustJsonAreaHeight);
+    backupPanel.appendChild(jsonArea);
+
+    panel.__enhancedSettingRefs.jsonArea = jsonArea;
+    adjustJsonAreaHeight();
+
+    function handleModuleExport(moduleKey) {
+        jsonArea.value = createFifybujModuleExportText(moduleKey);
+        adjustJsonAreaHeight();
+        _flashEnhancedSettingJsonArea(jsonArea, !!jsonArea.value);
+    }
+
+    function handleModuleImport(moduleKey) {
+        _showEnhancedImportConfirmDialog('確認要導入目前輸入框中的對應模塊資料嗎？', function() {
+            var ok = importFifybujModuleFromText(moduleKey, jsonArea.value);
+            if (ok && moduleKey === 'settings') _syncEnhancedSettingControlsFromStorage(panel);
+            adjustJsonAreaHeight();
+            _flashEnhancedSettingJsonArea(jsonArea, ok);
+        });
+    }
+
+    function createBackupActionRow(labelText, moduleKey) {
+        var row = document.createElement('div');
+        row.style.cssText =
+            'display: flex;' +
+            'align-items: center;' +
+            'gap: 8px;' +
+            'flex-wrap: wrap;';
+
+        var label = document.createElement('span');
+        label.textContent = labelText;
+        label.style.cssText =
+            'display: inline-block;' +
+            'width: 180px;' +
+            'min-width: 180px;' +
+            'font-size: 9pt;' +
+            'color: ' + colors.fg + ';' +
+            'white-space: nowrap;';
+        row.appendChild(label);
+
+        var exportBtn = document.createElement('button');
+        exportBtn.type = 'button';
+        exportBtn.textContent = '導出';
+        _styleEnhancedSettingOutlineButton(exportBtn, colors);
+
+        var importBtn = document.createElement('button');
+        importBtn.type = 'button';
+        importBtn.textContent = '導入';
+        _styleEnhancedSettingOutlineButton(importBtn, colors);
+
+        exportBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            handleModuleExport(moduleKey);
+        });
+
+        importBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            handleModuleImport(moduleKey);
+        });
+
+        row.appendChild(exportBtn);
+        row.appendChild(importBtn);
+        return row;
+    }
+
+    backupRowsWrap.appendChild(createBackupActionRow('Setting', 'settings'));
+    backupRowsWrap.appendChild(createBackupActionRow('Comment Template', 'commentTemplates'));
+    backupRowsWrap.appendChild(createBackupActionRow('Dict Manager', 'localDicts'));
+
+    var exportAllBtn = document.createElement('button');
+    exportAllBtn.type = 'button';
+    exportAllBtn.textContent = '導出全部';
+    _styleEnhancedSettingOutlineButton(exportAllBtn, colors);
+
+    var importAllBtn = document.createElement('button');
+    importAllBtn.type = 'button';
+    importAllBtn.textContent = '導入全部';
+    _styleEnhancedSettingOutlineButton(importAllBtn, colors);
+
+    var clearJsonBtn = document.createElement('button');
+    clearJsonBtn.type = 'button';
+    clearJsonBtn.textContent = '清空';
+    _styleEnhancedSettingOutlineButton(clearJsonBtn, colors);
+
+    exportAllBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        jsonArea.value = createFifybujAllExportText();
+        adjustJsonAreaHeight();
+        _flashEnhancedSettingJsonArea(jsonArea, !!jsonArea.value);
+    });
+
+    importAllBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        _showEnhancedImportConfirmDialog('確認要導入目前輸入框中的所有可識別模塊資料嗎？', function() {
+            var status = importAllFifybujBackupFromText(jsonArea.value);
+            var ok = !!(status.settings || status.commentTemplates || status.localDicts);
+            if (status.settings) _syncEnhancedSettingControlsFromStorage(panel);
+            adjustJsonAreaHeight();
+            _flashEnhancedSettingJsonArea(jsonArea, ok);
+        });
+    });
+
+    clearJsonBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        jsonArea.value = '';
+        adjustJsonAreaHeight();
+        _flashEnhancedSettingJsonArea(jsonArea, true);
+    });
+
+    jsonActionRow.appendChild(exportAllBtn);
+    jsonActionRow.appendChild(importAllBtn);
+    jsonActionRow.appendChild(clearJsonBtn);
+
+    contentScroll.appendChild(backupPanel);
+
+    var buttonTemplate = sidebar.querySelector('button');
+    var buttonTexts = Array.prototype.slice.call(sidebar.querySelectorAll('button')).map(function(btn) {
+        return btn.textContent;
+    });
+    buttonTexts.push('備份與還原');
+    sidebar.innerHTML = '';
+
+    var allPanels = originalPanels.concat([backupPanel]);
+    var allButtons = [];
+
+    function setActiveTab(index) {
+        allPanels.forEach(function(tabPanel, tabIndex) {
+            tabPanel.style.display = tabIndex === index ? 'block' : 'none';
+        });
+        allButtons.forEach(function(btn, btnIndex) {
+            btn.style.background = btnIndex === index ? colors.fg : 'transparent';
+            btn.style.color = btnIndex === index ? colors.bg : colors.fg;
+            btn.style.borderColor = colors.fg;
+        });
+        if (contentFooter) {
+            var hasFooterButtons = !!contentFooter.querySelector('button');
+            var shouldHideFooter = !hasFooterButtons || index === 6 || index === 7;
+            contentFooter.style.display = shouldHideFooter ? 'none' : (contentFooter.__origDisplay || '');
+            contentFooter.style.padding = contentFooter.__origPadding || '';
+            contentFooter.style.borderTop = contentFooter.__origBorderTop || '';
+            contentFooter.style.minHeight = contentFooter.__origMinHeight || '';
+        }
+    }
+
+    buttonTexts.forEach(function(text, index) {
+        var btn = buttonTemplate ? buttonTemplate.cloneNode(true) : document.createElement('button');
+        btn.textContent = text;
+        btn.type = 'button';
+        btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            setActiveTab(index);
+        });
+        sidebar.appendChild(btn);
+        allButtons.push(btn);
+    });
+
+    panel.__backupEnhanced = true;
+    _syncEnhancedSettingControlsFromStorage(panel);
+    setActiveTab(0);
+    return panel;
+}
+
+function _fifybujCleanupUnexpectedRomanizationOptions(root) {
+    Array.prototype.slice.call((root || document).querySelectorAll('select') || []).forEach(function(select) {
+        var keepRomanization = !!(select.__fifybujAllActionSelect || select.getAttribute('data-fifybuj-all-action-select') === '1');
+        Array.prototype.slice.call(select.options || []).forEach(function(opt) {
+            var isRomanization = String(opt.value || '') === '__fifybuj_bulk_romanization__' || String(opt.textContent || '').trim() === 'Romanization';
+            if (!isRomanization || keepRomanization) return;
+            select.removeChild(opt);
+        });
+    });
+}
+
+function _fifybujBulkActionLooksLikeAllActionSelect(select) {
+    return !!(select && (select.__fifybujAllActionSelect || select.getAttribute('data-fifybuj-all-action-select') === '1'));
+}
+
+function _fifybujGetSelectedOptionText(select) {
+    if (!select) return '';
+    var opt = select.options && select.selectedIndex >= 0 ? select.options[select.selectedIndex] : null;
+    return String((opt && opt.textContent) || select.value || '').trim();
+}
+
+function _fifybujEnsureRomanizationOptionInSelect(select) {
+    _fifybujCleanupUnexpectedRomanizationOptions(select && select.ownerDocument ? select.ownerDocument : document);
+}
+
+function _fifybujEnsureRomanizationOptionInDocument(root) {
+    _fifybujCleanupUnexpectedRomanizationOptions(root || document);
+}
+
+function _fifybujFindNearestBulkActionSelect(btn) {
+    var node = btn;
+    var depth = 0;
+    while (node && node !== document.body && depth < 6) {
+        var selects = node.querySelectorAll ? Array.prototype.slice.call(node.querySelectorAll('select') || []) : [];
+        var matched = selects.find(function(select) {
+            return _fifybujBulkActionLooksLikeAllActionSelect(select);
+        });
+        if (matched) return matched;
+        node = node.parentElement;
+        depth++;
+    }
+    return null;
+}
+
+function _fifybujFindRomanizationTrigger(root) {
+    if (!root || !root.querySelectorAll) return null;
+    var nodes = Array.prototype.slice.call(root.querySelectorAll('button, a, input[type="button"], input[type="submit"]') || []);
+    for (var i = 0; i < nodes.length; i++) {
+        var text = String(nodes[i].value || nodes[i].textContent || '').trim();
+        if (/Romanization/i.test(text) || text.indexOf('羅馬音') !== -1) return nodes[i];
+    }
+    return null;
+}
+
+function _fifybujTryKnownBulkRomanizationHooks() {
+    var names = [
+        'bulkRomanizeSelectedTitles',
+        'bulkRomanizeSelectedTitlesSafe',
+        'bulkRomanizeSelectedTitlesRewritten',
+        'applyRomanizationToSelectedTitles',
+        'applyRomanizationToCheckedTitles',
+        'romanizeSelectedTitles',
+        'romanizeCheckedGalleryTitles',
+        'runRomanizationForSelectedGalleries',
+        'runRomanizationForCheckedGalleries'
+    ];
+
+    for (var i = 0; i < names.length; i++) {
+        var fn = window[names[i]];
+        if (typeof fn === 'function') {
+            try {
+                fn();
+                return true;
+            } catch (e) {}
+        }
+    }
+    return false;
+}
+
+function _fifybujFallbackBulkRomanization() {
+    var count = 0;
+    var checkedBoxes = Array.prototype.slice.call(document.querySelectorAll('input[type="checkbox"]:checked') || []).filter(function(input) {
+        if (input.closest('.dict-manager-container')) return false;
+        if (input.closest('.show-file-list-container')) return false;
+        if (input.closest('.setting-panel')) return false;
+        if (input.closest('.dict-manager-panel')) return false;
+        return true;
+    });
+
+    checkedBoxes.forEach(function(input) {
+        var root = (input.closest && input.closest('tr, li, .row, .card, .item, .gallery, .thumb, .s')) || input.parentElement;
+        var trigger = _fifybujFindRomanizationTrigger(root);
+        if (!trigger) return;
+        try {
+            trigger.click();
+            count++;
+        } catch (e) {}
+    });
+
+    return count;
+}
+
+if (!window.__fifybujBulkRomanizationEnhancerInstalled) {
+    window.__fifybujBulkRomanizationEnhancerInstalled = true;
+
+    document.addEventListener('click', function(e) {
+        var btn = e.target && e.target.closest ? e.target.closest('button, a, input[type="button"], input[type="submit"]') : null;
+        if (!btn) return;
+
+        if (btn.closest && btn.closest('.show-file-list-container')) return;
+
+        var btnText = String(btn.value || btn.textContent || '').trim();
+        if (btnText !== 'Save') return;
+
+        var select = _fifybujFindNearestBulkActionSelect(btn);
+        if (!select) return;
+
+        var selectedText = _fifybujGetSelectedOptionText(select);
+        if (selectedText !== 'Romanization' && select.value !== '__fifybuj_bulk_romanization__') return;
+
+        e.preventDefault();
+        e.stopImmediatePropagation();
+
+        if (_fifybujTryKnownBulkRomanizationHooks()) return;
+        _fifybujFallbackBulkRomanization();
+    }, true);
+
+    var observer = new MutationObserver(function() {
+        _fifybujEnsureRomanizationOptionInDocument(document);
+    });
+    observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
+
+    setTimeout(function() {
+        _fifybujEnsureRomanizationOptionInDocument(document);
+    }, 0);
+}
+
+function _getFifybujDeleteConfirmSettings() {
+    var settings = Object.assign({}, getDefaultSettings(), loadSettings() || {});
+    return {
+        deleteDoubleConfirm: !!settings.deleteDoubleConfirm,
+        confirmBtnColorChange: settings.confirmBtnColorChange !== false,
+        doubleConfirmMs: _parseEnhancedSettingInt(settings.doubleConfirmMs, 1000)
+    };
+}
+
+function _getFifybujButtonText(btn) {
+    return String((btn && (btn.value || btn.textContent)) || '').replace(/\s+/g, ' ').trim();
+}
+
+function _restoreFifybujDeleteConfirmButtonState(btn) {
+    if (!btn) return;
+    if (btn.__fifybujDeleteConfirmTimer) {
+        clearTimeout(btn.__fifybujDeleteConfirmTimer);
+        btn.__fifybujDeleteConfirmTimer = null;
+    }
+    btn.__fifybujDeleteConfirmArmed = false;
+    btn.__fifybujDeleteConfirmExpireAt = 0;
+
+    if (btn.__fifybujDeleteConfirmFeedbackController && typeof btn.__fifybujDeleteConfirmFeedbackController.restore === 'function') {
+        btn.__fifybujDeleteConfirmFeedbackController.restore();
+        btn.__fifybujDeleteConfirmFeedbackController = null;
+    }
+}
+
+function _armFifybujDeleteConfirmButtonState(btn, settings) {
+    if (!btn) return;
+
+    _restoreFifybujDeleteConfirmButtonState(btn);
+
+    btn.__fifybujDeleteConfirmArmed = true;
+    btn.__fifybujDeleteConfirmExpireAt = Date.now() + Math.max(200, settings.doubleConfirmMs || 1000);
+    btn.__fifybujDeleteConfirmFeedbackController = _beginFeedbackState(btn, {
+        restoreText: _getFifybujButtonText(btn),
+        useColor: true,
+        colorType: 'error'
+    });
+
+    btn.__fifybujDeleteConfirmTimer = setTimeout(function() {
+        _restoreFifybujDeleteConfirmButtonState(btn);
+    }, Math.max(200, settings.doubleConfirmMs || 1000));
+}
+
+function _fifybujNodeMentionsCommentTemplate(node) {
+    var depth = 0;
+    while (node && node !== document.body && depth < 8) {
+        var text = String(node.textContent || '');
+        if (text.indexOf('Comment Template') !== -1) return true;
+        if (text.indexOf('Dict Manager') !== -1) return false;
+        node = node.parentElement;
+        depth++;
+    }
+    return false;
+}
+
+function _looksLikeCommentTemplateDeleteButton(btn) {
+    if (!btn) return false;
+    var text = _getFifybujButtonText(btn);
+    if (!(text === '刪除' || /^delete$/i.test(text) || text === '確認刪除')) return false;
+    return _fifybujNodeMentionsCommentTemplate(btn);
+}
+
+function _handleFifybujCommentTemplateDeleteClick(btn, event) {
+    if (!btn) return;
+    var settings = _getFifybujDeleteConfirmSettings();
+
+    if (!settings.deleteDoubleConfirm) {
+        _restoreFifybujDeleteConfirmButtonState(btn);
+        return;
+    }
+
+    var stillArmed = !!btn.__fifybujDeleteConfirmArmed && Date.now() <= (btn.__fifybujDeleteConfirmExpireAt || 0);
+
+    if (stillArmed) {
+        _restoreFifybujDeleteConfirmButtonState(btn);
+        return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+
+    _armFifybujDeleteConfirmButtonState(btn, settings);
+}
+
+if (!window.__fifybujCommentTemplateDeleteConfirmInstalled) {
+    window.__fifybujCommentTemplateDeleteConfirmInstalled = true;
+
+    document.addEventListener('click', function(e) {
+        var btn = e.target && e.target.closest ? e.target.closest('button, a, input[type="button"], input[type="submit"]') : null;
+        if (!_looksLikeCommentTemplateDeleteButton(btn)) return;
+        _handleFifybujCommentTemplateDeleteClick(btn, e);
+    }, true);
+}
+
 function createSettingPanel(sectionDiv) {
+    var panel = __createSettingPanelSidebar_card_v6(sectionDiv);
+    return _enhanceSettingPanelWithBackupUI(panel);
+}
+
+function __createSettingPanelSidebar_card_v6(sectionDiv) {
+    var __pageBg = '';
+    try {
+        __pageBg = getComputedStyle(document.body).backgroundColor || getComputedStyle(document.documentElement).backgroundColor || '';
+    } catch (e) {}
+    if (!__pageBg || __pageBg === 'rgba(0, 0, 0, 0)' || __pageBg === 'transparent') __pageBg = '#E0DED3';
+
+    var __sampleColorEl = document.querySelector('.s .h .l') || document.body;
+    var __pageFg = '';
+    try {
+        __pageFg = getComputedStyle(__sampleColorEl).color || '';
+    } catch (e2) {}
+    if (!__pageFg || __pageFg === 'rgba(0, 0, 0, 0)' || __pageFg === 'transparent') __pageFg = '#5C0D12';
+
+    var __activeBg = __pageFg;
+    var __activeFg = __pageBg;
+    var __settings = loadSettings();
+
+    function __styleInput(el, width) {
+        if (!el) return el;
+        el.style.cssText =
+            'width: ' + (width || '220px') + ';' +
+            'height: 24px;' +
+            'box-sizing: border-box;' +
+            'border: 1px solid ' + __pageFg + ';' +
+            'background: transparent;' +
+            'color: ' + __pageFg + ';' +
+            'font-size: 9pt;' +
+            'padding: 0 6px;' +
+            'border-radius: 2px;' +
+            'outline: none;' +
+            'box-shadow: none;';
+        return el;
+    }
+
+    function __styleButton(btn, primary) {
+        if (!btn) return btn;
+        btn.style.cssText =
+            'height: 26px;' +
+            'padding: 0 12px;' +
+            'box-sizing: border-box;' +
+            'border: 1px solid ' + __pageFg + ';' +
+            'border-radius: 2px;' +
+            'cursor: pointer;' +
+            'font-size: 9pt;' +
+            'font-weight: bold;' +
+            'line-height: 24px;' +
+            'box-shadow: none;' +
+            'background: ' + (primary ? __pageFg : 'transparent') + ';' +
+            'color: ' + (primary ? __pageBg : __pageFg) + ';';
+        return btn;
+    }
+
+    function __styleCheckbox(cb) {
+        if (!cb) return cb;
+        cb.style.cssText =
+            'margin: 0;' +
+            'width: 14px;' +
+            'height: 14px;' +
+            'accent-color: ' + __pageFg + ';' +
+            'flex: 0 0 auto;';
+        return cb;
+    }
+
+    function __bindNumberRange(input, min, max) {
+        if (!input) return;
+        input.addEventListener('input', function() {
+            var raw = String(input.value || '').trim();
+            if (raw === '') return;
+            var v = parseInt(raw, 10);
+            if (isNaN(v)) {
+                input.value = '';
+                return;
+            }
+            if (min !== null && min !== undefined && v < min) v = min;
+            if (max !== null && max !== undefined && v > max) v = max;
+            input.value = String(v);
+        });
+    }
+
+    function __createSectionTitle(text) {
+        var el = document.createElement('div');
+        el.textContent = text;
+        el.style.cssText =
+            'font-size: 10pt;' +
+            'font-weight: bold;' +
+            'color: ' + __pageFg + ';' +
+            'padding-bottom: 6px;' +
+            'margin-bottom: 10px;' +
+            'border-bottom: 1px solid ' + __pageFg + ';';
+        return el;
+    }
+
+    function __createFieldRow(labelText, inputEl, labelWidth, extraNode) {
+        var row = document.createElement('div');
+        row.style.cssText =
+            'display: flex;' +
+            'align-items: center;' +
+            'gap: 8px;' +
+            'margin-bottom: 8px;' +
+            'flex-wrap: nowrap;';
+
+        var label = document.createElement('span');
+        label.textContent = labelText;
+        label.style.cssText =
+            'display: inline-block;' +
+            'width: ' + labelWidth + 'px;' +
+            'min-width: ' + labelWidth + 'px;' +
+            'font-size: 9pt;' +
+            'color: ' + __pageFg + ';' +
+            'white-space: nowrap;' +
+            'text-align: left;';
+        row.appendChild(label);
+        row.appendChild(inputEl);
+        if (extraNode) row.appendChild(extraNode);
+        return row;
+    }
+
+    function __createCheckboxRow(checkboxEl, text) {
+        var row = document.createElement('label');
+        row.style.cssText =
+            'display: flex;' +
+            'align-items: center;' +
+            'justify-content: flex-start;' +
+            'gap: 8px;' +
+            'margin-bottom: 8px;' +
+            'font-size: 9pt;' +
+            'color: ' + __pageFg + ';' +
+            'cursor: pointer;' +
+            'user-select: text;' +
+            'line-height: 1;' +
+            'min-height: 18px;' +
+            'width: 100%;' +
+            'box-sizing: border-box;';
+
+        checkboxEl.style.margin = '0';
+        checkboxEl.style.position = 'relative';
+        checkboxEl.style.top = '0';
+        checkboxEl.style.flex = '0 0 auto';
+        row.appendChild(checkboxEl);
+
+        var span = document.createElement('span');
+        span.textContent = text;
+        span.style.cssText =
+            'display: flex;' +
+            'align-items: center;' +
+            'line-height: 18px;' +
+            'min-height: 18px;' +
+            'flex: 0 1 auto;';
+        row.appendChild(span);
+        return row;
+    }
+
+    function __createTabButton(text) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = text;
+        btn.style.cssText =
+            'width: 100%;' +
+            'height: 30px;' +
+            'padding: 0 10px;' +
+            'border: 1px solid ' + __pageFg + ';' +
+            'border-radius: 2px;' +
+            'background: transparent;' +
+            'color: ' + __pageFg + ';' +
+            'font-size: 9pt;' +
+            'font-weight: bold;' +
+            'text-align: left;' +
+            'cursor: pointer;' +
+            'box-sizing: border-box;' +
+            'box-shadow: none;';
+        return btn;
+    }
+
+    function __createBulletList(titleText, items) {
+        var wrap = document.createElement('div');
+        wrap.style.cssText = 'margin-bottom: 10px;';
+
+        var title = document.createElement('div');
+        title.textContent = titleText;
+        title.style.cssText =
+            'font-size: 9pt;' +
+            'font-weight: bold;' +
+            'color: ' + __pageFg + ';' +
+            'margin-bottom: 6px;';
+        wrap.appendChild(title);
+
+        items.forEach(function(item) {
+            var line = document.createElement('div');
+            line.textContent = '• ' + item;
+            line.style.cssText =
+                'font-size: 9pt;' +
+                'color: ' + __pageFg + ';' +
+                'line-height: 1.5;';
+            wrap.appendChild(line);
+        });
+
+        return wrap;
+    }
+
+    function __createInitCard(titleText, deleteItems, keepItems, buttonText) {
+        var card = document.createElement('div');
+        card.style.cssText =
+            'flex: 1 1 calc((100% - 24px) / 3);' +
+            'min-width: 260px;' +
+            'border: 1px solid ' + __pageFg + ';' +
+            'background: ' + __pageBg + ';' +
+            'padding: 12px;' +
+            'box-sizing: border-box;' +
+            'display: flex;' +
+            'flex-direction: column;' +
+            'align-items: stretch;';
+
+        var title = document.createElement('div');
+        title.textContent = titleText;
+        title.style.cssText =
+            'font-size: 10pt;' +
+            'font-weight: bold;' +
+            'color: ' + __pageFg + ';' +
+            'padding-bottom: 6px;' +
+            'margin-bottom: 10px;' +
+            'border-bottom: 1px solid ' + __pageFg + ';';
+        card.appendChild(title);
+
+        var infoRow = document.createElement('div');
+        infoRow.style.cssText =
+            'display: grid;' +
+            'grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);' +
+            'column-gap: 24px;' +
+            'row-gap: 12px;' +
+            'align-items: start;' +
+            'width: 100%;' +
+            'box-sizing: border-box;';
+
+        var deleteBlock = __createBulletList('將刪除：', deleteItems);
+        deleteBlock.style.cssText =
+            'min-width: 0;' +
+            'width: 100%;' +
+            'margin-bottom: 0;' +
+            'box-sizing: border-box;';
+
+        var keepBlock = __createBulletList('保留：', keepItems);
+        keepBlock.style.cssText =
+            'min-width: 0;' +
+            'width: 100%;' +
+            'margin-bottom: 0;' +
+            'box-sizing: border-box;';
+
+        infoRow.appendChild(deleteBlock);
+        infoRow.appendChild(keepBlock);
+        card.appendChild(infoRow);
+
+        var spacer = document.createElement('div');
+        spacer.style.cssText = 'flex: 1;';
+        card.appendChild(spacer);
+
+        var footer = document.createElement('div');
+        footer.style.cssText =
+            'display: flex;' +
+            'justify-content: flex-end;' +
+            'margin-top: 12px;';
+
+        var btn = document.createElement('button');
+        btn.textContent = buttonText;
+        __styleButton(btn, true);
+        footer.appendChild(btn);
+        card.appendChild(footer);
+
+        return { card: card, button: btn };
+    }
+
+    var container = document.createElement('div');
+    container.className = 'setting-container';
+    container.style.cssText =
+        'display: none;' +
+        'padding: 10px;' +
+        'background-color: ' + __pageBg + ';' +
+        'border: 1px solid ' + __pageFg + ';' +
+        'position: relative;' +
+        'user-select: text;';
+
+    var title = document.createElement('div');
+    title.textContent = '設置';
+    title.style.cssText =
+        'font-weight: bold;' +
+        'font-size: 10pt;' +
+        'color: ' + __pageFg + ';' +
+        'margin-bottom: 10px;' +
+        'border-bottom: 1px solid ' + __pageFg + ';' +
+        'padding-bottom: 4px;';
+    container.appendChild(title);
+
+    var shell = document.createElement('div');
+    shell.style.cssText =
+        'display: flex;' +
+        'min-height: 520px;' +
+        'border: 1px solid ' + __pageFg + ';' +
+        'background: ' + __pageBg + ';';
+
+    var sidebar = document.createElement('div');
+    sidebar.style.cssText =
+        'width: 200px;' +
+        'min-width: 200px;' +
+        'border-right: 1px solid ' + __pageFg + ';' +
+        'padding: 8px;' +
+        'box-sizing: border-box;' +
+        'background: ' + __pageBg + ';' +
+        'display: flex;' +
+        'flex-direction: column;' +
+        'gap: 6px;';
+
+    var contentWrap = document.createElement('div');
+    contentWrap.style.cssText =
+        'flex: 1;' +
+        'min-width: 0;' +
+        'display: flex;' +
+        'flex-direction: column;' +
+        'background: ' + __pageBg + ';';
+
+    var contentScroll = document.createElement('div');
+    contentScroll.style.cssText =
+        'flex: 1;' +
+        'padding: 12px;' +
+        'box-sizing: border-box;' +
+        'overflow-y: auto;' +
+        'background: ' + __pageBg + ';';
+
+    var contentFooter = document.createElement('div');
+    contentFooter.style.cssText =
+        'padding: 0 12px 12px 12px;' +
+        'display: flex;' +
+        'justify-content: flex-end;' +
+        'align-items: flex-end;' +
+        'background: transparent;';
+
+    contentWrap.appendChild(contentScroll);
+    contentWrap.appendChild(contentFooter);
+    shell.appendChild(sidebar);
+    shell.appendChild(contentWrap);
+    container.appendChild(shell);
+
+    var rootFolderStatus = document.createElement('span');
+    rootFolderStatus.style.cssText =
+        'font-size: 8pt;' +
+        'color: ' + __pageFg + ';' +
+        'white-space: nowrap;';
+
+    function refreshRootFolderPermissionStatus() {
+        dbGet('handles', 'root_folder_handle').then(function(handle) {
+            if (!handle) {
+                rootFolderStatus.textContent = '未授權';
+                return;
+            }
+            return handle.queryPermission({ mode: 'read' }).then(function(perm) {
+                rootFolderStatus.textContent = perm === 'granted' ? '✓ 已授權' : '未授權';
+            });
+        }).catch(function() {
+            rootFolderStatus.textContent = '未授權';
+        });
+    }
+
+    var inputRootFolder = document.createElement('input');
+    inputRootFolder.type = 'text';
+    inputRootFolder.value = __settings.customRootFolder || '';
+    inputRootFolder.placeholder = '保存後自動要求授權';
+    __styleInput(inputRootFolder, '280px');
+    inputRootFolder.addEventListener('blur', refreshRootFolderPermissionStatus);
+
+    var inputRetryCount = document.createElement('input');
+    inputRetryCount.type = 'number';
+    inputRetryCount.min = '1';
+    inputRetryCount.max = '10';
+    inputRetryCount.value = __settings.retryCount || 3;
+    __styleInput(inputRetryCount, '90px');
+    __bindNumberRange(inputRetryCount, 1, 10);
+
+    var cbTranslatedDefaultMTL = document.createElement('input');
+    cbTranslatedDefaultMTL.type = 'checkbox';
+    cbTranslatedDefaultMTL.checked = !!__settings.translatedDefaultMTL;
+    __styleCheckbox(cbTranslatedDefaultMTL);
+
+    var cbNonJapaneseDefaultTranslated = document.createElement('input');
+    cbNonJapaneseDefaultTranslated.type = 'checkbox';
+    cbNonJapaneseDefaultTranslated.checked = !!__settings.nonJapaneseDefaultTranslated;
+    __styleCheckbox(cbNonJapaneseDefaultTranslated);
+
+    var cbJapaneseDefaultOfficialTextless = document.createElement('input');
+    cbJapaneseDefaultOfficialTextless.type = 'checkbox';
+    cbJapaneseDefaultOfficialTextless.checked = !!__settings.japaneseDefaultOfficialTextless;
+    __styleCheckbox(cbJapaneseDefaultOfficialTextless);
+
+    var cbDeleteDoubleConfirm = document.createElement('input');
+    cbDeleteDoubleConfirm.type = 'checkbox';
+    cbDeleteDoubleConfirm.checked = !!__settings.deleteDoubleConfirm;
+    __styleCheckbox(cbDeleteDoubleConfirm);
+
+    var cbConfirmBtnColor = document.createElement('input');
+    cbConfirmBtnColor.type = 'checkbox';
+    cbConfirmBtnColor.checked = __settings.confirmBtnColorChange !== false;
+    __styleCheckbox(cbConfirmBtnColor);
+
+    var inputDoubleConfirmMs = document.createElement('input');
+    inputDoubleConfirmMs.type = 'number';
+    inputDoubleConfirmMs.min = '0';
+    inputDoubleConfirmMs.max = '10000';
+    inputDoubleConfirmMs.value = __settings.doubleConfirmMs || 1000;
+    __styleInput(inputDoubleConfirmMs, '100px');
+    __bindNumberRange(inputDoubleConfirmMs, 0, 10000);
+
+    var inputConfirmColorMs = document.createElement('input');
+    inputConfirmColorMs.type = 'number';
+    inputConfirmColorMs.min = '0';
+    inputConfirmColorMs.max = '10000';
+    inputConfirmColorMs.value = __settings.confirmBtnColorMs || 1000;
+    __styleInput(inputConfirmColorMs, '100px');
+    __bindNumberRange(inputConfirmColorMs, 0, 10000);
+
+    var inputConfirmSuccessColor = document.createElement('input');
+    inputConfirmSuccessColor.type = 'text';
+    inputConfirmSuccessColor.value = _normalizeConfirmFeedbackColorCode(__settings.confirmBtnSuccessColor, '0,255,0');
+    inputConfirmSuccessColor.placeholder = '0,255,0';
+    __styleInput(inputConfirmSuccessColor, '130px');
+
+    var inputConfirmErrorColor = document.createElement('input');
+    inputConfirmErrorColor.type = 'text';
+    inputConfirmErrorColor.value = _normalizeConfirmFeedbackColorCode(__settings.confirmBtnErrorColor, '255,0,0');
+    inputConfirmErrorColor.placeholder = '255,0,0';
+    __styleInput(inputConfirmErrorColor, '130px');
+
+    var inputDoubleConfirmColor = document.createElement('input');
+    inputDoubleConfirmColor.type = 'text';
+    inputDoubleConfirmColor.value = _normalizeConfirmFeedbackColorCode(__settings.doubleConfirmColor, '255,0,0');
+    inputDoubleConfirmColor.placeholder = '255,0,0';
+    __styleInput(inputDoubleConfirmColor, '130px');
+
+    var inputPreviewMaxWidth = document.createElement('input');
+    inputPreviewMaxWidth.type = 'number';
+    inputPreviewMaxWidth.min = '1';
+    inputPreviewMaxWidth.max = '9999';
+    inputPreviewMaxWidth.value = __settings.previewMaxWidth || 800;
+    __styleInput(inputPreviewMaxWidth, '90px');
+    __bindNumberRange(inputPreviewMaxWidth, 1, 9999);
+
+    var inputPreviewMaxHeight = document.createElement('input');
+    inputPreviewMaxHeight.type = 'number';
+    inputPreviewMaxHeight.min = '1';
+    inputPreviewMaxHeight.max = '9999';
+    inputPreviewMaxHeight.value = __settings.previewMaxHeight || 800;
+    __styleInput(inputPreviewMaxHeight, '90px');
+    __bindNumberRange(inputPreviewMaxHeight, 1, 9999);
+
+    var __cbGalleryFolderManagerCopyWithExtension = document.createElement('input');
+    __cbGalleryFolderManagerCopyWithExtension.type = 'checkbox';
+    __cbGalleryFolderManagerCopyWithExtension.checked = __settings.galleryFolderManagerCopyWithExtension !== false;
+    __styleCheckbox(__cbGalleryFolderManagerCopyWithExtension);
+
+    var cbAutoSwitchDictDropdown = document.createElement('input');
+    cbAutoSwitchDictDropdown.type = 'checkbox';
+    cbAutoSwitchDictDropdown.checked = __settings.autoSwitchDictDropdown !== false;
+    __styleCheckbox(cbAutoSwitchDictDropdown);
+
+    var inputDictPriorityPadLength = document.createElement('input');
+    inputDictPriorityPadLength.type = 'number';
+    inputDictPriorityPadLength.min = '1';
+    inputDictPriorityPadLength.max = '20';
+    inputDictPriorityPadLength.value = __settings.dictPriorityPadLength || 5;
+    __styleInput(inputDictPriorityPadLength, '90px');
+    __bindNumberRange(inputDictPriorityPadLength, 1, 20);
+
+    var cbShowDebugLogs = document.createElement('input');
+    cbShowDebugLogs.type = 'checkbox';
+    cbShowDebugLogs.checked = !!__settings.showDebugLogsInBrowserConsole;
+    __styleCheckbox(cbShowDebugLogs);
+
+    var cbLogToBrowserConsole = document.createElement('input');
+    cbLogToBrowserConsole.type = 'checkbox';
+    cbLogToBrowserConsole.checked = !!__settings.logToBrowserConsole;
+    __styleCheckbox(cbLogToBrowserConsole);
+
+    var priorityKeys = [
+        { key: 'mtl', label: 'MTL', tagMain: '[MTL]', tagJp: '' },
+        { key: 'digital', label: 'Digital/DL版', tagMain: '[Digital]', tagJp: '[DL版]' },
+        { key: 'decensored', label: 'Decensored/無修正', tagMain: '[Decensored]', tagJp: '[無修正]' },
+        { key: 'colorized', label: 'Colorized/カラー化', tagMain: '[Colorized]', tagJp: '[カラー化]' },
+        { key: 'textless', label: 'Textless/無字', tagMain: '[Textless]', tagJp: '[無字]' },
+        { key: 'sample', label: 'Sample/見本', tagMain: '[Sample]', tagJp: '[見本]' },
+        { key: 'aiGenerated', label: 'AI Generated/AI生成', tagMain: '[AI Generated]', tagJp: '[AI生成]' },
+        { key: 'ongoing', label: 'Ongoing/進行中', tagMain: '[Ongoing]', tagJp: '[進行中]' },
+        { key: 'incomplete', label: 'Incomplete/ページ欠落', tagMain: '[Incomplete]', tagJp: '[ページ欠落]' }
+    ];
+
+    var currentPriorities = __settings.optionPriorities || {};
+    var priorityList = priorityKeys.map(function(item) {
+        return {
+            key: item.key,
+            label: item.label,
+            tagMain: item.tagMain,
+            tagJp: item.tagJp,
+            priority: currentPriorities[item.key] || 99
+        };
+    });
+    priorityList.sort(function(a, b) { return a.priority - b.priority; });
+
+    var priorityTable = document.createElement('div');
+    priorityTable.style.cssText =
+        'max-width: 520px;' +
+        'border: 1px solid ' + __pageFg + ';' +
+        'background: ' + __pageBg + ';';
+
+    function rebuildPriorityList() {
+        while (priorityTable.firstChild) priorityTable.removeChild(priorityTable.firstChild);
+
+        priorityList.forEach(function(item, index) {
+            var row = document.createElement('div');
+            row.style.cssText =
+                'display: flex;' +
+                'align-items: center;' +
+                'gap: 8px;' +
+                'padding: 6px 8px;' +
+                'border-bottom: ' + (index < priorityList.length - 1 ? ('1px solid ' + __pageFg) : 'none') + ';' +
+                'background: ' + __pageBg + ';';
+
+            var indexLabel = document.createElement('span');
+            indexLabel.textContent = String(index + 1);
+            indexLabel.style.cssText =
+                'display: inline-block;' +
+                'width: 24px;' +
+                'min-width: 24px;' +
+                'font-size: 9pt;' +
+                'font-weight: bold;' +
+                'color: ' + __pageFg + ';' +
+                'text-align: right;';
+            row.appendChild(indexLabel);
+
+            var label = document.createElement('span');
+            label.textContent = item.label;
+            label.style.cssText =
+                'flex: 1;' +
+                'min-width: 0;' +
+                'font-size: 9pt;' +
+                'color: ' + __pageFg + ';' +
+                'word-break: break-all;';
+            row.appendChild(label);
+
+            var upBtn = document.createElement('button');
+            upBtn.textContent = '↑';
+            __styleButton(upBtn, false);
+            upBtn.style.width = '28px';
+            upBtn.style.padding = '0';
+            if (index === 0) {
+                upBtn.style.opacity = '0.35';
+                upBtn.style.cursor = 'default';
+            }
+            upBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                if (index === 0) return;
+                var tmp = priorityList[index];
+                priorityList[index] = priorityList[index - 1];
+                priorityList[index - 1] = tmp;
+                rebuildPriorityList();
+            });
+            row.appendChild(upBtn);
+
+            var downBtn = document.createElement('button');
+            downBtn.textContent = '↓';
+            __styleButton(downBtn, false);
+            downBtn.style.width = '28px';
+            downBtn.style.padding = '0';
+            if (index === priorityList.length - 1) {
+                downBtn.style.opacity = '0.35';
+                downBtn.style.cursor = 'default';
+            }
+            downBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                if (index === priorityList.length - 1) return;
+                var tmp2 = priorityList[index];
+                priorityList[index] = priorityList[index + 1];
+                priorityList[index + 1] = tmp2;
+                rebuildPriorityList();
+            });
+            row.appendChild(downBtn);
+
+            priorityTable.appendChild(row);
+        });
+    }
+
+    rebuildPriorityList();
+
+    var generalPanel = document.createElement('div');
+    generalPanel.style.cssText = 'display: none;';
+    generalPanel.appendChild(__createSectionTitle('通用設置'));
+    generalPanel.appendChild(__createFieldRow('自定義根文件夾', inputRootFolder, 150, rootFolderStatus));
+    generalPanel.appendChild(__createFieldRow('創建失敗重試次數', inputRetryCount, 150));
+    refreshRootFolderPermissionStatus();
+
+    var interfacePanel = document.createElement('div');
+    interfacePanel.style.cssText = 'display: none;';
+    interfacePanel.appendChild(__createSectionTitle('介面設置'));
+    interfacePanel.appendChild(__createCheckboxRow(cbTranslatedDefaultMTL, '勾選 Translated 時默認啟用 MTL'));
+    interfacePanel.appendChild(__createCheckboxRow(cbNonJapaneseDefaultTranslated, '選擇除 Japanese 的語言時默認啟用 Translated'));
+    interfacePanel.appendChild(__createCheckboxRow(cbJapaneseDefaultOfficialTextless, '選擇 Japanese 時默認啟用 Official / Textless'));
+    interfacePanel.appendChild(__createCheckboxRow(cbDeleteDoubleConfirm, '刪除時需要雙重確認'));
+    interfacePanel.appendChild(__createCheckboxRow(cbConfirmBtnColor, '按鈕是否變色'));
+    interfacePanel.appendChild(__createFieldRow('雙重確認時間 (毫秒)', inputDoubleConfirmMs, 190));
+    interfacePanel.appendChild(__createFieldRow('按鈕變色時長 (毫秒)', inputConfirmColorMs, 190));
+    interfacePanel.appendChild(__createFieldRow('按鈕成功顏色RGB值', inputConfirmSuccessColor, 190));
+    interfacePanel.appendChild(__createFieldRow('按鈕失敗顏色RGB值', inputConfirmErrorColor, 190));
+    interfacePanel.appendChild(__createFieldRow('雙重確認變色顏色RGB值', inputDoubleConfirmColor, 190));
+
+    var specialSizeRow = document.createElement('div');
+    specialSizeRow.style.cssText =
+        'display: flex;' +
+        'align-items: center;' +
+        'gap: 10px;' +
+        'flex-wrap: wrap;' +
+        'margin-top: 2px;';
+    var widthLabel = document.createElement('span');
+    widthLabel.textContent = '預覧圖片最大寬度';
+    widthLabel.style.cssText = 'font-size: 9pt; color: ' + __pageFg + '; white-space: nowrap;';
+    var heightLabel = document.createElement('span');
+    heightLabel.textContent = '預覧圖片最大高度';
+    heightLabel.style.cssText = 'font-size: 9pt; color: ' + __pageFg + '; white-space: nowrap;';
+    specialSizeRow.appendChild(widthLabel);
+    specialSizeRow.appendChild(inputPreviewMaxWidth);
+    specialSizeRow.appendChild(heightLabel);
+    specialSizeRow.appendChild(inputPreviewMaxHeight);
+    interfacePanel.appendChild(specialSizeRow);
+
+    var galleryFolderManagerPanel = document.createElement('div');
+    galleryFolderManagerPanel.style.cssText = 'display: none;';
+    galleryFolderManagerPanel.appendChild(__createSectionTitle('Gallery Folder Manager設置'));
+    galleryFolderManagerPanel.appendChild(__createCheckboxRow(__cbGalleryFolderManagerCopyWithExtension, '是否複製副檔名'));
+
+    var dictPanel = document.createElement('div');
+    dictPanel.style.cssText = 'display: none;';
+    dictPanel.appendChild(__createSectionTitle('Dict Manager設置'));
+    dictPanel.appendChild(__createCheckboxRow(cbAutoSwitchDictDropdown, 'Dict Manager點擊時頂部下拉清單是否自動切換'));
+    dictPanel.appendChild(__createFieldRow('優先度固定補零長度', inputDictPriorityPadLength, 170));
+
+    var priorityPanel = document.createElement('div');
+    priorityPanel.style.cssText = 'display: none;';
+    priorityPanel.appendChild(__createSectionTitle('特殊標記優先度設置'));
+
+    var priorityLabel = document.createElement('div');
+    priorityLabel.textContent = '特殊標記優先度';
+    priorityLabel.style.cssText =
+        'font-size: 9pt;' +
+        'font-weight: bold;' +
+        'color: ' + __pageFg + ';' +
+        'margin-bottom: 10px;';
+    priorityPanel.appendChild(priorityLabel);
+
+    var priorityNote = document.createElement('div');
+    priorityNote.textContent = '數字越小越優先，使用上下按鈕調整順序。';
+    priorityNote.style.cssText =
+        'font-size: 8.5pt;' +
+        'color: ' + __pageFg + ';' +
+        'margin-bottom: 10px;';
+    priorityPanel.appendChild(priorityNote);
+    priorityPanel.appendChild(priorityTable);
+
+    var debugPanel = document.createElement('div');
+    debugPanel.style.cssText = 'display: none;';
+    debugPanel.appendChild(__createSectionTitle('偵錯設置'));
+    debugPanel.appendChild(__createCheckboxRow(cbShowDebugLogs, '顯示debug訊息'));
+    debugPanel.appendChild(__createCheckboxRow(cbLogToBrowserConsole, '在瀏覽器主控台中輸出控制台訊息'));
+
+    var initPanel = document.createElement('div');
+    initPanel.style.cssText = 'display: none;';
+    initPanel.appendChild(__createSectionTitle('初始化'));
+
+    var cardsWrap = document.createElement('div');
+    cardsWrap.style.cssText =
+        'display: flex;' +
+        'gap: 12px;' +
+        'flex-wrap: wrap;' +
+        'align-items: stretch;';
+
+    var clearCacheCard = __createInitCard(
+        '清理緩存',
+        ['已保存的圖庫資料', '文件列表', '評論模板', '掃描的文件夾', '本地文件夾授權', '所有待處理任務', '外部字典緩存'],
+        ['腳本設置', '本地自定義字典'],
+        '清理緩存'
+    );
+
+    var resetDictCard = __createInitCard(
+        '重置字典',
+        ['外部字典緩存'],
+        ['所有用戶數據', '腳本設置', '本地自定義字典'],
+        '重置字典'
+    );
+
+    var resetSettingsCard = __createInitCard(
+        '重置設置',
+        ['本地設置'],
+        ['已保存的圖庫資料', '本地自定義字典', '外部字典緩存'],
+        '重置設置'
+    );
+
+    cardsWrap.appendChild(clearCacheCard.card);
+    cardsWrap.appendChild(resetDictCard.card);
+    cardsWrap.appendChild(resetSettingsCard.card);
+    initPanel.appendChild(cardsWrap);
+
+    var saveSettingsBtn = document.createElement('button');
+    saveSettingsBtn.textContent = '保存設置';
+    __styleButton(saveSettingsBtn, true);
+    contentFooter.appendChild(saveSettingsBtn);
+
+    contentScroll.appendChild(generalPanel);
+    contentScroll.appendChild(interfacePanel);
+    contentScroll.appendChild(galleryFolderManagerPanel);
+    contentScroll.appendChild(dictPanel);
+    contentScroll.appendChild(priorityPanel);
+    contentScroll.appendChild(debugPanel);
+    contentScroll.appendChild(initPanel);
+
+    var tabs = [
+        { key: 'general', label: '通用設置', panel: generalPanel },
+        { key: 'interface', label: '介面設置', panel: interfacePanel },
+        { key: 'galleryFolderManager', label: 'Gallery Folder Manager設置', panel: galleryFolderManagerPanel },
+        { key: 'dict', label: 'Dict Manager設置', panel: dictPanel },
+        { key: 'priority', label: '特殊標記優先度設置', panel: priorityPanel },
+        { key: 'debug', label: '偵錯設置', panel: debugPanel },
+        { key: 'init', label: '初始化', panel: initPanel }
+    ];
+
+    var tabButtons = {};
+
+    function setActiveTab(tabKey) {
+        tabs.forEach(function(tab) {
+            var active = tab.key === tabKey;
+            tab.panel.style.display = active ? 'block' : 'none';
+            if (tabButtons[tab.key]) {
+                tabButtons[tab.key].style.background = active ? __activeBg : 'transparent';
+                tabButtons[tab.key].style.color = active ? __activeFg : __pageFg;
+            }
+        });
+        contentFooter.style.display = tabKey === 'init' ? 'none' : 'flex';
+    }
+
+    tabs.forEach(function(tab) {
+        var btn = __createTabButton(tab.label);
+        btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            setActiveTab(tab.key);
+        });
+        sidebar.appendChild(btn);
+        tabButtons[tab.key] = btn;
+    });
+
+    setActiveTab('general');
+
+    clearCacheCard.button.addEventListener('click', function(e) {
+        e.preventDefault();
+        var warning = '警告：此操作無法復原。\n\n將刪除：\n• 已保存的圖庫資料\n• 文件列表\n• 評論模板\n• 掃描的文件夾\n• 本地文件夾授權\n• 所有待處理任務\n• 外部字典緩存\n\n保留：\n• 腳本設置\n• 本地自定義字典\n\n確定要清理緩存嗎？';
+        if (!confirm(warning)) return;
+
+        var gmKeys = [
+            'saved_galleries', 'file_lists', 'comment_templates',
+            'scanned_folders', 'local_folders',
+            'pending_create', 'pending_create_queue', 'pending_upload',
+            'create_success'
+        ];
+        gmKeys.forEach(function(key) {
+            GM_deleteValue(key);
+        });
+        opLog('清理緩存', { type: 'GM + IndexedDB' });
+
+        var dbReq = indexedDB.deleteDatabase('FIFYBUJ_DB');
+        dbReq.onsuccess = function() {
+            flowLog('ClearCache', 'IndexedDB 已刪除');
+            var unpublishedSection = document.querySelector('.s[data-custom="true"]');
+            if (unpublishedSection) unpublishedSection.remove();
+            clearCacheCard.button.textContent = '已清空 ✓';
+            setTimeout(function() {
+                clearCacheCard.button.textContent = '清理緩存';
+            }, 2000);
+        };
+        dbReq.onerror = function(ev) {
+            errorLog('ClearCache', 'IndexedDB 刪除失敗', ev.target.error);
+            clearCacheCard.button.textContent = '清空失敗';
+            setTimeout(function() {
+                clearCacheCard.button.textContent = '清理緩存';
+            }, 2000);
+        };
+        dbReq.onblocked = function() {
+            warnLog('ClearCache', 'IndexedDB 刪除被阻擋，請關閉其他分頁後重試');
+            clearCacheCard.button.textContent = '請關閉其他分頁';
+            setTimeout(function() {
+                clearCacheCard.button.textContent = '清理緩存';
+            }, 3000);
+        };
+    });
+
+    resetDictCard.button.addEventListener('click', function(e) {
+        e.preventDefault();
+        var warning = '警告：此操作無法復原。\n\n將刪除：\n• 外部字典緩存\n\n保留：\n• 所有用戶數據\n• 腳本設置\n• 本地自定義字典\n\n確定要重置字典嗎？';
+        if (!confirm(warning)) return;
+
+        var dbReq = indexedDB.deleteDatabase('FIFYBUJ_DB');
+        dbReq.onsuccess = function() {
+            opLog('重置字典', { scope: 'IndexedDB' });
+            resetDictCard.button.textContent = '已重置 ✓';
+            setTimeout(function() {
+                resetDictCard.button.textContent = '重置字典';
+            }, 2000);
+        };
+        dbReq.onerror = function(ev) {
+            errorLog('ResetDict', 'IndexedDB 刪除失敗', ev.target.error);
+            resetDictCard.button.textContent = '重置失敗';
+            setTimeout(function() {
+                resetDictCard.button.textContent = '重置字典';
+            }, 2000);
+        };
+        dbReq.onblocked = function() {
+            warnLog('ResetDict', 'IndexedDB 刪除被阻擋，請關閉其他分頁後重試');
+            resetDictCard.button.textContent = '請關閉其他分頁';
+            setTimeout(function() {
+                resetDictCard.button.textContent = '重置字典';
+            }, 3000);
+        };
+    });
+
+    resetSettingsCard.button.addEventListener('click', function(e) {
+        e.preventDefault();
+        var warning = '警告：此操作無法復原。\n\n將刪除：\n• 本地設置\n\n保留：\n• 已保存的圖庫資料\n• 本地自定義字典\n• 外部字典緩存\n\n確定要重置設置嗎？';
+        if (!confirm(warning)) return;
+
+        try {
+            GM_deleteValue('fifybuj_settings');
+            var defaultSettings = getDefaultSettings();
+            GM_setValue('fifybuj_settings', defaultSettings);
+            currentSettings = defaultSettings;
+            opLog('重置設置', defaultSettings);
+            resetSettingsCard.button.textContent = '已重置 ✓';
+            setTimeout(function() {
+                resetSettingsCard.button.textContent = '重置設置';
+                window.location.reload();
+            }, 2000);
+        } catch (err) {
+            errorLog('ResetSettings', '重置失敗', err);
+            resetSettingsCard.button.textContent = '重置失敗';
+            setTimeout(function() {
+                resetSettingsCard.button.textContent = '重置設置';
+            }, 2000);
+        }
+    });
+
+    saveSettingsBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+
+        var newPriorities = {};
+        priorityList.forEach(function(item, index) {
+            newPriorities[item.key] = index + 1;
+        });
+
+        var newRootFolder = inputRootFolder.value.trim();
+        var newSettings = Object.assign({}, getDefaultSettings(), getCurrentSettingsSafe(), {
+            customRootFolder: newRootFolder,
+            retryCount: parseInt(inputRetryCount.value, 10) || 3,
+            translatedDefaultMTL: cbTranslatedDefaultMTL.checked,
+            nonJapaneseDefaultTranslated: cbNonJapaneseDefaultTranslated.checked,
+            japaneseDefaultOfficialTextless: cbJapaneseDefaultOfficialTextless.checked,
+            autoSwitchDictDropdown: cbAutoSwitchDictDropdown.checked,
+            showDebugLogsInBrowserConsole: cbShowDebugLogs.checked,
+            dictPriorityPadLength: parseInt(inputDictPriorityPadLength.value, 10) || 5,
+            deleteDoubleConfirm: cbDeleteDoubleConfirm.checked,
+            doubleConfirmMs: parseInt(inputDoubleConfirmMs.value, 10) || 1000,
+            logToBrowserConsole: cbLogToBrowserConsole.checked,
+            confirmBtnColorChange: cbConfirmBtnColor.checked,
+            confirmBtnColorMs: parseInt(inputConfirmColorMs.value, 10) || 1000,
+            confirmBtnSuccessColor: _normalizeConfirmFeedbackColorCode(inputConfirmSuccessColor.value, '0,255,0'),
+            confirmBtnErrorColor: _normalizeConfirmFeedbackColorCode(inputConfirmErrorColor.value, '255,0,0'),
+            doubleConfirmColor: _normalizeConfirmFeedbackColorCode(inputDoubleConfirmColor.value, '255,0,0'),
+            previewMaxWidth: parseInt(inputPreviewMaxWidth.value, 10) || 800,
+            previewMaxHeight: parseInt(inputPreviewMaxHeight.value, 10) || 800,
+            galleryFolderManagerCopyWithExtension: __cbGalleryFolderManagerCopyWithExtension.checked,
+            optionPriorities: newPriorities
+        });
+
+        saveSettings(newSettings);
+
+        if (newRootFolder && window.showDirectoryPicker) {
+            rootFolderStatus.textContent = '等待授權...';
+            window.showDirectoryPicker({ mode: 'read', startIn: 'downloads' })
+                .then(function(handle) {
+                    return dbSet('handles', 'root_folder_handle', handle).then(function() {
+                        return handle.queryPermission({ mode: 'read' });
+                    }).then(function(perm) {
+                        rootFolderStatus.textContent = perm === 'granted' ? '✓ 已授權' : '授權失敗';
+                    });
+                })
+                .catch(function(err) {
+                    rootFolderStatus.textContent = err.name !== 'AbortError' ? '授權失敗' : '已取消';
+                });
+        } else {
+            refreshRootFolderPermissionStatus();
+        }
+
+        flashButtonSavedState(saveSettingsBtn, '已保存 ✓', '保存設置', 1500);
+    });
+
+    return container;
+}
+
+function __createSettingPanel_legacy(sectionDiv) {
+    return __createSettingPanelSidebar_legacy_v6(sectionDiv);
+}
+
+function __createSettingPanelSidebar_legacy_v6(sectionDiv) {
+    var __panelBg = '#F5E6D3';
+    var __panelFg = '#4A3728';
+    var __activeBg = '#4A3728';
+    var __activeFg = '#F5E6D3';
+
+    function __styleInput(el, width) {
+        if (!el) return el;
+        el.style.cssText =
+            'width: ' + (width || '220px') + ';' +
+            'height: 24px;' +
+            'box-sizing: border-box;' +
+            'border: 1px solid ' + __panelFg + ';' +
+            'background: transparent;' +
+            'color: ' + __panelFg + ';' +
+            'font-size: 9pt;' +
+            'padding: 0 6px;' +
+            'border-radius: 2px;' +
+            'outline: none;' +
+            'box-shadow: none;';
+        return el;
+    }
+
+    function __styleButton(btn, primary) {
+        if (!btn) return btn;
+        btn.style.cssText =
+            'height: 26px;' +
+            'padding: 0 12px;' +
+            'box-sizing: border-box;' +
+            'border: 1px solid ' + __panelFg + ';' +
+            'border-radius: 2px;' +
+            'cursor: pointer;' +
+            'font-size: 9pt;' +
+            'font-weight: bold;' +
+            'line-height: 24px;' +
+            'box-shadow: none;' +
+            'background: ' + (primary ? __panelFg : 'transparent') + ';' +
+            'color: ' + (primary ? __panelBg : __panelFg) + ';';
+        return btn;
+    }
+
+    function __styleCheckbox(cb) {
+        if (!cb) return cb;
+        cb.style.cssText =
+            'margin: 0;' +
+            'width: 14px;' +
+            'height: 14px;' +
+            'accent-color: ' + __panelFg + ';' +
+            'flex: 0 0 auto;';
+        return cb;
+    }
+
+    function __bindNumberRange(input, min, max) {
+        if (!input) return;
+        input.addEventListener('input', function() {
+            var raw = String(input.value || '').trim();
+            if (raw === '') return;
+            var v = parseInt(raw, 10);
+            if (isNaN(v)) {
+                input.value = '';
+                return;
+            }
+            if (min !== null && min !== undefined && v < min) v = min;
+            if (max !== null && max !== undefined && v > max) v = max;
+            input.value = String(v);
+        });
+    }
+
+    function __createSectionTitle(text) {
+        var el = document.createElement('div');
+        el.textContent = text;
+        el.style.cssText =
+            'font-size: 10pt;' +
+            'font-weight: bold;' +
+            'color: ' + __panelFg + ';' +
+            'padding-bottom: 6px;' +
+            'margin-bottom: 10px;' +
+            'border-bottom: 1px solid ' + __panelFg + ';';
+        return el;
+    }
+
+    function __createFieldRow(labelText, inputEl, labelWidth, extraNode) {
+        var row = document.createElement('div');
+        row.style.cssText =
+            'display: flex;' +
+            'align-items: center;' +
+            'gap: 8px;' +
+            'margin-bottom: 8px;' +
+            'flex-wrap: nowrap;';
+
+        var label = document.createElement('span');
+        label.textContent = labelText;
+        label.style.cssText =
+            'display: inline-block;' +
+            'width: ' + labelWidth + 'px;' +
+            'min-width: ' + labelWidth + 'px;' +
+            'font-size: 9pt;' +
+            'color: ' + __panelFg + ';' +
+            'white-space: nowrap;' +
+            'text-align: left;';
+        row.appendChild(label);
+        row.appendChild(inputEl);
+
+        if (extraNode) row.appendChild(extraNode);
+        return row;
+    }
+
+    function __createCheckboxRow(checkboxEl, text) {
+        var row = document.createElement('label');
+        row.style.cssText =
+            'display: flex;' +
+            'align-items: center;' +
+            'gap: 8px;' +
+            'margin-bottom: 8px;' +
+            'font-size: 9pt;' +
+            'color: ' + __panelFg + ';' +
+            'cursor: pointer;' +
+            'user-select: text;';
+        row.appendChild(checkboxEl);
+
+        var span = document.createElement('span');
+        span.textContent = text;
+        span.style.cssText = 'display: inline-block; line-height: 1.4;';
+        row.appendChild(span);
+        return row;
+    }
+
+    function __createTabButton(text) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = text;
+        btn.style.cssText =
+            'width: 100%;' +
+            'height: 30px;' +
+            'padding: 0 10px;' +
+            'border: 1px solid ' + __panelFg + ';' +
+            'border-radius: 2px;' +
+            'background: transparent;' +
+            'color: ' + __panelFg + ';' +
+            'font-size: 9pt;' +
+            'font-weight: bold;' +
+            'text-align: left;' +
+            'cursor: pointer;' +
+            'box-sizing: border-box;' +
+            'box-shadow: none;';
+        return btn;
+    }
+
+    var __settings = loadSettings();
+
+    var __container = document.createElement('div');
+    __container.className = 'setting-container';
+    __container.style.cssText =
+        'display: none;' +
+        'padding: 10px;' +
+        'background-color: ' + __panelBg + ';' +
+        'border: 1px solid ' + __panelFg + ';' +
+        'position: relative;' +
+        'user-select: text;';
+
+    var __title = document.createElement('div');
+    __title.textContent = '設置';
+    __title.style.cssText =
+        'font-weight: bold;' +
+        'font-size: 10pt;' +
+        'color: ' + __panelFg + ';' +
+        'margin-bottom: 10px;' +
+        'border-bottom: 1px solid ' + __panelFg + ';' +
+        'padding-bottom: 4px;';
+    __container.appendChild(__title);
+
+    var __shell = document.createElement('div');
+    __shell.style.cssText =
+        'display: flex;' +
+        'min-height: 520px;' +
+        'border: 1px solid ' + __panelFg + ';' +
+        'background: ' + __panelBg + ';';
+
+    var __sidebar = document.createElement('div');
+    __sidebar.style.cssText =
+        'width: 200px;' +
+        'min-width: 200px;' +
+        'border-right: 1px solid ' + __panelFg + ';' +
+        'padding: 8px;' +
+        'box-sizing: border-box;' +
+        'background: ' + __panelBg + ';' +
+        'display: flex;' +
+        'flex-direction: column;' +
+        'gap: 6px;';
+
+    var __contentWrap = document.createElement('div');
+    __contentWrap.style.cssText =
+        'flex: 1;' +
+        'min-width: 0;' +
+        'display: flex;' +
+        'flex-direction: column;' +
+        'background: ' + __panelBg + ';';
+
+    var __contentScroll = document.createElement('div');
+    __contentScroll.style.cssText =
+        'flex: 1;' +
+        'padding: 12px;' +
+        'box-sizing: border-box;' +
+        'overflow-y: auto;' +
+        'background: ' + __panelBg + ';';
+
+    var __contentFooter = document.createElement('div');
+    __contentFooter.style.cssText =
+        'padding: 10px 12px;' +
+        'border-top: 1px solid ' + __panelFg + ';' +
+        'display: flex;' +
+        'justify-content: flex-end;' +
+        'align-items: center;' +
+        'background: ' + __panelBg + ';';
+
+    __contentWrap.appendChild(__contentScroll);
+    __contentWrap.appendChild(__contentFooter);
+    __shell.appendChild(__sidebar);
+    __shell.appendChild(__contentWrap);
+    __container.appendChild(__shell);
+
+    var __rootFolderStatus = document.createElement('span');
+    __rootFolderStatus.style.cssText =
+        'font-size: 8pt;' +
+        'color: ' + __panelFg + ';' +
+        'white-space: nowrap;';
+
+    function __refreshRootFolderPermissionStatus() {
+        dbGet('handles', 'root_folder_handle').then(function(handle) {
+            if (!handle) {
+                __rootFolderStatus.textContent = '未授權';
+                return;
+            }
+            return handle.queryPermission({ mode: 'read' }).then(function(perm) {
+                __rootFolderStatus.textContent = perm === 'granted' ? '✓ 已授權' : '未授權';
+            });
+        }).catch(function() {
+            __rootFolderStatus.textContent = '未授權';
+        });
+    }
+
+    var __inputRootFolder = document.createElement('input');
+    __inputRootFolder.type = 'text';
+    __inputRootFolder.value = __settings.customRootFolder || '';
+    __inputRootFolder.placeholder = '保存後自動要求授權';
+    __styleInput(__inputRootFolder, '280px');
+    __inputRootFolder.addEventListener('blur', __refreshRootFolderPermissionStatus);
+
+    var __inputRetryCount = document.createElement('input');
+    __inputRetryCount.type = 'number';
+    __inputRetryCount.min = '1';
+    __inputRetryCount.max = '10';
+    __inputRetryCount.value = __settings.retryCount || 3;
+    __styleInput(__inputRetryCount, '90px');
+    __bindNumberRange(__inputRetryCount, 1, 10);
+
+    var __cbTranslatedDefaultMTL = document.createElement('input');
+    __cbTranslatedDefaultMTL.type = 'checkbox';
+    __cbTranslatedDefaultMTL.checked = !!__settings.translatedDefaultMTL;
+    __styleCheckbox(__cbTranslatedDefaultMTL);
+
+    var __cbNonJapaneseDefaultTranslated = document.createElement('input');
+    __cbNonJapaneseDefaultTranslated.type = 'checkbox';
+    __cbNonJapaneseDefaultTranslated.checked = !!__settings.nonJapaneseDefaultTranslated;
+    __styleCheckbox(__cbNonJapaneseDefaultTranslated);
+
+    var __cbJapaneseDefaultOfficialTextless = document.createElement('input');
+    __cbJapaneseDefaultOfficialTextless.type = 'checkbox';
+    __cbJapaneseDefaultOfficialTextless.checked = !!__settings.japaneseDefaultOfficialTextless;
+    __styleCheckbox(__cbJapaneseDefaultOfficialTextless);
+
+    var __cbDeleteDoubleConfirm = document.createElement('input');
+    __cbDeleteDoubleConfirm.type = 'checkbox';
+    __cbDeleteDoubleConfirm.checked = !!__settings.deleteDoubleConfirm;
+    __styleCheckbox(__cbDeleteDoubleConfirm);
+
+    var __cbConfirmBtnColor = document.createElement('input');
+    __cbConfirmBtnColor.type = 'checkbox';
+    __cbConfirmBtnColor.checked = __settings.confirmBtnColorChange !== false;
+    __styleCheckbox(__cbConfirmBtnColor);
+
+    var __inputDoubleConfirmMs = document.createElement('input');
+    __inputDoubleConfirmMs.type = 'number';
+    __inputDoubleConfirmMs.min = '0';
+    __inputDoubleConfirmMs.max = '10000';
+    __inputDoubleConfirmMs.value = __settings.doubleConfirmMs || 1000;
+    __styleInput(__inputDoubleConfirmMs, '100px');
+    __bindNumberRange(__inputDoubleConfirmMs, 0, 10000);
+
+    var __inputConfirmColorMs = document.createElement('input');
+    __inputConfirmColorMs.type = 'number';
+    __inputConfirmColorMs.min = '0';
+    __inputConfirmColorMs.max = '10000';
+    __inputConfirmColorMs.value = __settings.confirmBtnColorMs || 1000;
+    __styleInput(__inputConfirmColorMs, '100px');
+    __bindNumberRange(__inputConfirmColorMs, 0, 10000);
+
+    var __inputPreviewMaxWidth = document.createElement('input');
+    __inputPreviewMaxWidth.type = 'number';
+    __inputPreviewMaxWidth.min = '1';
+    __inputPreviewMaxWidth.max = '9999';
+    __inputPreviewMaxWidth.value = __settings.previewMaxWidth || 800;
+    __styleInput(__inputPreviewMaxWidth, '90px');
+    __bindNumberRange(__inputPreviewMaxWidth, 1, 9999);
+
+    var __inputPreviewMaxHeight = document.createElement('input');
+    __inputPreviewMaxHeight.type = 'number';
+    __inputPreviewMaxHeight.min = '1';
+    __inputPreviewMaxHeight.max = '9999';
+    __inputPreviewMaxHeight.value = __settings.previewMaxHeight || 800;
+    __styleInput(__inputPreviewMaxHeight, '90px');
+    __bindNumberRange(__inputPreviewMaxHeight, 1, 9999);
+
+    var __cbAutoSwitchDictDropdown = document.createElement('input');
+    __cbAutoSwitchDictDropdown.type = 'checkbox';
+    __cbAutoSwitchDictDropdown.checked = __settings.autoSwitchDictDropdown !== false;
+    __styleCheckbox(__cbAutoSwitchDictDropdown);
+
+    var __inputDictPriorityPadLength = document.createElement('input');
+    __inputDictPriorityPadLength.type = 'number';
+    __inputDictPriorityPadLength.min = '1';
+    __inputDictPriorityPadLength.max = '20';
+    __inputDictPriorityPadLength.value = __settings.dictPriorityPadLength || 5;
+    __styleInput(__inputDictPriorityPadLength, '90px');
+    __bindNumberRange(__inputDictPriorityPadLength, 1, 20);
+
+    var __cbShowDebugLogs = document.createElement('input');
+    __cbShowDebugLogs.type = 'checkbox';
+    __cbShowDebugLogs.checked = !!__settings.showDebugLogsInBrowserConsole;
+    __styleCheckbox(__cbShowDebugLogs);
+
+    var __cbLogToBrowserConsole = document.createElement('input');
+    __cbLogToBrowserConsole.type = 'checkbox';
+    __cbLogToBrowserConsole.checked = !!__settings.logToBrowserConsole;
+    __styleCheckbox(__cbLogToBrowserConsole);
+
+    var __priorityKeys = [
+        { key: 'mtl', label: 'MTL', tagMain: '[MTL]', tagJp: '' },
+        { key: 'digital', label: 'Digital/DL版', tagMain: '[Digital]', tagJp: '[DL版]' },
+        { key: 'decensored', label: 'Decensored/無修正', tagMain: '[Decensored]', tagJp: '[無修正]' },
+        { key: 'colorized', label: 'Colorized/カラー化', tagMain: '[Colorized]', tagJp: '[カラー化]' },
+        { key: 'textless', label: 'Textless/無字', tagMain: '[Textless]', tagJp: '[無字]' },
+        { key: 'sample', label: 'Sample/見本', tagMain: '[Sample]', tagJp: '[見本]' },
+        { key: 'aiGenerated', label: 'AI Generated/AI生成', tagMain: '[AI Generated]', tagJp: '[AI生成]' },
+        { key: 'ongoing', label: 'Ongoing/進行中', tagMain: '[Ongoing]', tagJp: '[進行中]' },
+        { key: 'incomplete', label: 'Incomplete/ページ欠落', tagMain: '[Incomplete]', tagJp: '[ページ欠落]' }
+    ];
+
+    var __currentPriorities = __settings.optionPriorities || {};
+    var __priorityList = __priorityKeys.map(function(item) {
+        return {
+            key: item.key,
+            label: item.label,
+            tagMain: item.tagMain,
+            tagJp: item.tagJp,
+            priority: __currentPriorities[item.key] || 99
+        };
+    });
+    __priorityList.sort(function(a, b) { return a.priority - b.priority; });
+
+    var __priorityTable = document.createElement('div');
+    __priorityTable.style.cssText =
+        'max-width: 520px;' +
+        'border: 1px solid ' + __panelFg + ';' +
+        'background: ' + __panelBg + ';';
+
+    function __rebuildPriorityList() {
+        while (__priorityTable.firstChild) __priorityTable.removeChild(__priorityTable.firstChild);
+
+        __priorityList.forEach(function(item, index) {
+            var row = document.createElement('div');
+            row.style.cssText =
+                'display: flex;' +
+                'align-items: center;' +
+                'gap: 8px;' +
+                'padding: 6px 8px;' +
+                'border-bottom: ' + (index < __priorityList.length - 1 ? ('1px solid ' + __panelFg) : 'none') + ';' +
+                'background: ' + __panelBg + ';';
+
+            var indexLabel = document.createElement('span');
+            indexLabel.textContent = String(index + 1);
+            indexLabel.style.cssText =
+                'display: inline-block;' +
+                'width: 24px;' +
+                'min-width: 24px;' +
+                'font-size: 9pt;' +
+                'font-weight: bold;' +
+                'color: ' + __panelFg + ';' +
+                'text-align: right;';
+            row.appendChild(indexLabel);
+
+            var label = document.createElement('span');
+            label.textContent = item.label;
+            label.style.cssText =
+                'flex: 1;' +
+                'min-width: 0;' +
+                'font-size: 9pt;' +
+                'color: ' + __panelFg + ';' +
+                'word-break: break-all;';
+            row.appendChild(label);
+
+            var upBtn = document.createElement('button');
+            upBtn.textContent = '↑';
+            __styleButton(upBtn, false);
+            upBtn.style.width = '28px';
+            upBtn.style.padding = '0';
+            if (index === 0) {
+                upBtn.style.opacity = '0.35';
+                upBtn.style.cursor = 'default';
+            }
+            upBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                if (index === 0) return;
+                var tmp = __priorityList[index];
+                __priorityList[index] = __priorityList[index - 1];
+                __priorityList[index - 1] = tmp;
+                __rebuildPriorityList();
+            });
+            row.appendChild(upBtn);
+
+            var downBtn = document.createElement('button');
+            downBtn.textContent = '↓';
+            __styleButton(downBtn, false);
+            downBtn.style.width = '28px';
+            downBtn.style.padding = '0';
+            if (index === __priorityList.length - 1) {
+                downBtn.style.opacity = '0.35';
+                downBtn.style.cursor = 'default';
+            }
+            downBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                if (index === __priorityList.length - 1) return;
+                var tmp2 = __priorityList[index];
+                __priorityList[index] = __priorityList[index + 1];
+                __priorityList[index + 1] = tmp2;
+                __rebuildPriorityList();
+            });
+            row.appendChild(downBtn);
+
+            __priorityTable.appendChild(row);
+        });
+    }
+
+    __rebuildPriorityList();
+
+    var __generalPanel = document.createElement('div');
+    __generalPanel.style.cssText = 'display: none;';
+    __generalPanel.appendChild(__createSectionTitle('通用設置'));
+    __generalPanel.appendChild(__createFieldRow('自定義根文件夾', __inputRootFolder, 150, __rootFolderStatus));
+    __generalPanel.appendChild(__createFieldRow('創建失敗重試次數', __inputRetryCount, 150));
+    __refreshRootFolderPermissionStatus();
+
+    var __interfacePanel = document.createElement('div');
+    __interfacePanel.style.cssText = 'display: none;';
+    __interfacePanel.appendChild(__createSectionTitle('介面設置'));
+    __interfacePanel.appendChild(__createCheckboxRow(__cbTranslatedDefaultMTL, '勾選 Translated 時默認啟用 MTL'));
+    __interfacePanel.appendChild(__createCheckboxRow(__cbNonJapaneseDefaultTranslated, '選擇除 Japanese 的語言時默認啟用 Translated'));
+    __interfacePanel.appendChild(__createCheckboxRow(__cbJapaneseDefaultOfficialTextless, '選擇 Japanese 時默認啟用 Official / Textless'));
+    __interfacePanel.appendChild(__createCheckboxRow(__cbDeleteDoubleConfirm, '刪除時需要雙重確認'));
+    __interfacePanel.appendChild(__createCheckboxRow(__cbConfirmBtnColor, '確認按鈕是否變色'));
+    __interfacePanel.appendChild(__createFieldRow('雙重確認時間 (毫秒)', __inputDoubleConfirmMs, 190));
+    __interfacePanel.appendChild(__createFieldRow('確認按鈕變色時長 (毫秒)', __inputConfirmColorMs, 190));
+
+    var __specialSizeRow = document.createElement('div');
+    __specialSizeRow.style.cssText =
+        'display: flex;' +
+        'align-items: center;' +
+        'gap: 10px;' +
+        'flex-wrap: wrap;' +
+        'margin-top: 2px;';
+    var __widthLabel = document.createElement('span');
+    __widthLabel.textContent = '預覧圖片最大寬度';
+    __widthLabel.style.cssText = 'font-size: 9pt; color: ' + __panelFg + '; white-space: nowrap;';
+    var __heightLabel = document.createElement('span');
+    __heightLabel.textContent = '預覧圖片最大高度';
+    __heightLabel.style.cssText = 'font-size: 9pt; color: ' + __panelFg + '; white-space: nowrap;';
+    __specialSizeRow.appendChild(__widthLabel);
+    __specialSizeRow.appendChild(__inputPreviewMaxWidth);
+    __specialSizeRow.appendChild(__heightLabel);
+    __specialSizeRow.appendChild(__inputPreviewMaxHeight);
+    __interfacePanel.appendChild(__specialSizeRow);
+
+    var __galleryFolderManagerPanel = document.createElement('div');
+    __galleryFolderManagerPanel.style.cssText = 'display: none;';
+    __galleryFolderManagerPanel.appendChild(__createSectionTitle('Gallery Folder Manager設置'));
+    __galleryFolderManagerPanel.appendChild(__createCheckboxRow(__cbGalleryFolderManagerCopyWithExtension, '是否複製副檔名'));
+
+    var __dictPanel = document.createElement('div');
+    __dictPanel.style.cssText = 'display: none;';
+    __dictPanel.appendChild(__createSectionTitle('Dict Manager設置'));
+    __dictPanel.appendChild(__createCheckboxRow(__cbAutoSwitchDictDropdown, 'Dict Manager點擊時頂部下拉清單是否自動切換'));
+    __dictPanel.appendChild(__createFieldRow('優先度固定補零長度', __inputDictPriorityPadLength, 170));
+
+    var __priorityPanel = document.createElement('div');
+    __priorityPanel.style.cssText = 'display: none;';
+    __priorityPanel.appendChild(__createSectionTitle('特殊標記優先度設置'));
+
+    var __priorityLabel = document.createElement('div');
+    __priorityLabel.textContent = '特殊標記優先度';
+    __priorityLabel.style.cssText =
+        'font-size: 9pt;' +
+        'font-weight: bold;' +
+        'color: ' + __panelFg + ';' +
+        'margin-bottom: 10px;';
+    __priorityPanel.appendChild(__priorityLabel);
+
+    var __priorityNote = document.createElement('div');
+    __priorityNote.textContent = '數字越小越優先，使用上下按鈕調整順序。';
+    __priorityNote.style.cssText =
+        'font-size: 8.5pt;' +
+        'color: ' + __panelFg + ';' +
+        'margin-bottom: 10px;';
+    __priorityPanel.appendChild(__priorityNote);
+    __priorityPanel.appendChild(__priorityTable);
+
+    var __debugPanel = document.createElement('div');
+    __debugPanel.style.cssText = 'display: none;';
+    __debugPanel.appendChild(__createSectionTitle('偵錯設置'));
+    __debugPanel.appendChild(__createCheckboxRow(__cbShowDebugLogs, '顯示debug訊息'));
+    __debugPanel.appendChild(__createCheckboxRow(__cbLogToBrowserConsole, '在瀏覽器主控台中輸出控制台訊息'));
+
+    var __initPanel = document.createElement('div');
+    __initPanel.style.cssText = 'display: none;';
+    __initPanel.appendChild(__createSectionTitle('初始化'));
+
+    var __initNote = document.createElement('div');
+    __initNote.textContent = '初始化操作會清除對應資料，請謹慎使用。';
+    __initNote.style.cssText =
+        'font-size: 9pt;' +
+        'color: ' + __panelFg + ';' +
+        'margin-bottom: 12px;';
+    __initPanel.appendChild(__initNote);
+
+    var __initBtnWrap = document.createElement('div');
+    __initBtnWrap.style.cssText =
+        'display: flex;' +
+        'flex-wrap: wrap;' +
+        'gap: 8px;';
+
+    var __clearCacheBtn = document.createElement('button');
+    __clearCacheBtn.textContent = '清理緩存';
+    __styleButton(__clearCacheBtn, false);
+
+    var __resetDictBtn = document.createElement('button');
+    __resetDictBtn.textContent = '重置字典';
+    __styleButton(__resetDictBtn, false);
+
+    var __resetSettingsBtn = document.createElement('button');
+    __resetSettingsBtn.textContent = '重置設置';
+    __styleButton(__resetSettingsBtn, false);
+
+    __initBtnWrap.appendChild(__clearCacheBtn);
+    __initBtnWrap.appendChild(__resetDictBtn);
+    __initBtnWrap.appendChild(__resetSettingsBtn);
+    __initPanel.appendChild(__initBtnWrap);
+
+    var __saveSettingsBtn = document.createElement('button');
+    __saveSettingsBtn.textContent = '保存設置';
+    __styleButton(__saveSettingsBtn, true);
+    __contentFooter.appendChild(__saveSettingsBtn);
+
+    __contentScroll.appendChild(__generalPanel);
+    __contentScroll.appendChild(__interfacePanel);
+    __contentScroll.appendChild(__galleryFolderManagerPanel);
+    __contentScroll.appendChild(__dictPanel);
+    __contentScroll.appendChild(__priorityPanel);
+    __contentScroll.appendChild(__debugPanel);
+    __contentScroll.appendChild(__initPanel);
+
+    var __tabs = [
+        { key: 'general', label: '通用設置', panel: __generalPanel },
+        { key: 'interface', label: '介面設置', panel: __interfacePanel },
+        { key: 'galleryFolderManager', label: 'Gallery Folder Manager設置', panel: __galleryFolderManagerPanel },
+        { key: 'dict', label: 'Dict Manager設置', panel: __dictPanel },
+        { key: 'priority', label: '特殊標記優先度設置', panel: __priorityPanel },
+        { key: 'debug', label: '偵錯設置', panel: __debugPanel },
+        { key: 'init', label: '初始化', panel: __initPanel }
+    ];
+
+    var __tabButtons = {};
+
+    function __setActiveTab(tabKey) {
+        __tabs.forEach(function(tab) {
+            var active = tab.key === tabKey;
+            tab.panel.style.display = active ? 'block' : 'none';
+            if (__tabButtons[tab.key]) {
+                __tabButtons[tab.key].style.background = active ? __activeBg : 'transparent';
+                __tabButtons[tab.key].style.color = active ? __activeFg : __panelFg;
+            }
+        });
+    }
+
+    __tabs.forEach(function(tab) {
+        var btn = __createTabButton(tab.label);
+        btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            __setActiveTab(tab.key);
+        });
+        __sidebar.appendChild(btn);
+        __tabButtons[tab.key] = btn;
+    });
+
+    __setActiveTab('general');
+
+    __clearCacheBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        var msg1 = '確認要清理緩存嗎？\n\n將刪除以下內容：\n• 已保存的圖庫資料\n• 文件列表\n• 評論模板\n• 掃描的文件夾\n• 本地文件夾授權\n• 所有待處理任務\n• 外部字典緩存\n\n將保留：\n• 腳本設置\n• 本地自定義字典';
+        if (!confirm(msg1)) return;
+        if (!confirm('二次確認：所有資料將永久刪除，無法復原。確定繼續？')) return;
+
+        var gmKeys = [
+            'saved_galleries', 'file_lists', 'comment_templates',
+            'scanned_folders', 'local_folders',
+            'pending_create', 'pending_create_queue', 'pending_upload',
+            'create_success'
+        ];
+        gmKeys.forEach(function(key) {
+            GM_deleteValue(key);
+        });
+        opLog('清理緩存', { type: 'GM + IndexedDB' });
+
+        var dbReq = indexedDB.deleteDatabase('FIFYBUJ_DB');
+        dbReq.onsuccess = function() {
+            flowLog('ClearCache', 'IndexedDB 已刪除');
+            var unpublishedSection = document.querySelector('.s[data-custom="true"]');
+            if (unpublishedSection) unpublishedSection.remove();
+            __clearCacheBtn.textContent = '已清空 ✓';
+            setTimeout(function() {
+                __clearCacheBtn.textContent = '清理緩存';
+            }, 2000);
+        };
+        dbReq.onerror = function(ev) {
+            errorLog('ClearCache', 'IndexedDB 刪除失敗', ev.target.error);
+            __clearCacheBtn.textContent = '清空失敗';
+            setTimeout(function() {
+                __clearCacheBtn.textContent = '清理緩存';
+            }, 2000);
+        };
+        dbReq.onblocked = function() {
+            warnLog('ClearCache', 'IndexedDB 刪除被阻擋，請關閉其他分頁後重試');
+            __clearCacheBtn.textContent = '請關閉其他分頁';
+            setTimeout(function() {
+                __clearCacheBtn.textContent = '清理緩存';
+            }, 3000);
+        };
+    });
+
+    __resetDictBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        var msg1 = '確認要重置字典嗎？\n\n將刪除以下內容：\n• 外部字典緩存\n\n下次使用羅馬字轉換時將自動重新下載。\n\n將保留：\n• 所有用戶數據\n• 腳本設置\n• 本地自定義字典';
+        if (!confirm(msg1)) return;
+        if (!confirm('二次確認：此操作無法復原。確定繼續？')) return;
+
+        var dbReq = indexedDB.deleteDatabase('FIFYBUJ_DB');
+        dbReq.onsuccess = function() {
+            opLog('重置字典', { scope: 'IndexedDB' });
+            __resetDictBtn.textContent = '已重置 ✓';
+            setTimeout(function() {
+                __resetDictBtn.textContent = '重置字典';
+            }, 2000);
+        };
+        dbReq.onerror = function(ev) {
+            errorLog('ResetDict', 'IndexedDB 刪除失敗', ev.target.error);
+            __resetDictBtn.textContent = '重置失敗';
+            setTimeout(function() {
+                __resetDictBtn.textContent = '重置字典';
+            }, 2000);
+        };
+        dbReq.onblocked = function() {
+            warnLog('ResetDict', 'IndexedDB 刪除被阻擋，請關閉其他分頁後重試');
+            __resetDictBtn.textContent = '請關閉其他分頁';
+            setTimeout(function() {
+                __resetDictBtn.textContent = '重置字典';
+            }, 3000);
+        };
+    });
+
+    __resetSettingsBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        var msg1 = '確認要重置設置嗎？\n\n將刪除本地設置並還原至默認值。\n\n將保留：\n• 已保存的圖庫資料\n• 本地自定義字典\n• 外部字典緩存';
+        if (!confirm(msg1)) return;
+        if (!confirm('二次確認：此操作無法復原。確定繼續？')) return;
+
+        try {
+            GM_deleteValue('fifybuj_settings');
+            var defaultSettings = getDefaultSettings();
+            GM_setValue('fifybuj_settings', defaultSettings);
+            currentSettings = defaultSettings;
+            opLog('重置設置', defaultSettings);
+            __resetSettingsBtn.textContent = '已重置 ✓';
+            setTimeout(function() {
+                __resetSettingsBtn.textContent = '重置設置';
+                window.location.reload();
+            }, 2000);
+        } catch (err) {
+            errorLog('ResetSettings', '重置失敗', err);
+            __resetSettingsBtn.textContent = '重置失敗';
+            setTimeout(function() {
+                __resetSettingsBtn.textContent = '重置設置';
+            }, 2000);
+        }
+    });
+
+    __saveSettingsBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+
+        var newPriorities = {};
+        __priorityList.forEach(function(item, index) {
+            newPriorities[item.key] = index + 1;
+        });
+
+        var newRootFolder = __inputRootFolder.value.trim();
+        var newSettings = Object.assign({}, getDefaultSettings(), getCurrentSettingsSafe(), {
+            customRootFolder: newRootFolder,
+            retryCount: parseInt(__inputRetryCount.value, 10) || 3,
+            translatedDefaultMTL: __cbTranslatedDefaultMTL.checked,
+            nonJapaneseDefaultTranslated: __cbNonJapaneseDefaultTranslated.checked,
+            japaneseDefaultOfficialTextless: __cbJapaneseDefaultOfficialTextless.checked,
+            autoSwitchDictDropdown: __cbAutoSwitchDictDropdown.checked,
+            showDebugLogsInBrowserConsole: __cbShowDebugLogs.checked,
+            dictPriorityPadLength: parseInt(__inputDictPriorityPadLength.value, 10) || 5,
+            deleteDoubleConfirm: __cbDeleteDoubleConfirm.checked,
+            doubleConfirmMs: parseInt(__inputDoubleConfirmMs.value, 10) || 1000,
+            logToBrowserConsole: __cbLogToBrowserConsole.checked,
+            confirmBtnColorChange: __cbConfirmBtnColor.checked,
+            confirmBtnColorMs: parseInt(__inputConfirmColorMs.value, 10) || 1000,
+            previewMaxWidth: parseInt(__inputPreviewMaxWidth.value, 10) || 800,
+            previewMaxHeight: parseInt(__inputPreviewMaxHeight.value, 10) || 800,
+            optionPriorities: newPriorities
+        });
+
+        saveSettings(newSettings);
+
+        if (newRootFolder && window.showDirectoryPicker) {
+            __rootFolderStatus.textContent = '等待授權...';
+            window.showDirectoryPicker({ mode: 'read', startIn: 'downloads' })
+                .then(function(handle) {
+                    return dbSet('handles', 'root_folder_handle', handle).then(function() {
+                        return handle.queryPermission({ mode: 'read' });
+                    }).then(function(perm) {
+                        __rootFolderStatus.textContent = perm === 'granted' ? '✓ 已授權' : '授權失敗';
+                    });
+                })
+                .catch(function(err) {
+                    __rootFolderStatus.textContent = err.name !== 'AbortError' ? '授權失敗' : '已取消';
+                });
+        } else {
+            __refreshRootFolderPermissionStatus();
+        }
+
+        flashButtonSavedState(__saveSettingsBtn, '已保存 ✓', '保存設置', 1500);
+    });
+
+    return __container;
+
+
     var container = document.createElement('div');
     container.className = 'setting-container';
     container.style.cssText = 'display: none; padding: 10px; background-color: #E0DED3; border: 1px solid #5C0D12; position: relative;';
@@ -8491,6 +14716,19 @@ function createSettingPanel(sectionDiv) {
     row4.appendChild(label4);
     container.appendChild(row4);
 
+    var row4c = document.createElement('label');
+    row4c.style.cssText = 'margin-bottom: 8px; display: flex; align-items: center; gap: 8px; user-select: text; cursor: pointer;';
+    var cb4c = document.createElement('input');
+    cb4c.type = 'checkbox';
+    cb4c.checked = !!settings.showDebugLogsInBrowserConsole;
+    cb4c.style.cssText = 'accent-color: #5C0D12; flex: 0 0 auto; margin: 0;';
+    var label4c = document.createElement('span');
+    label4c.textContent = '顯示debug訊息';
+    label4c.style.cssText = 'font-size: 9pt; flex: 0 1 auto; min-width: 0; white-space: nowrap; user-select: text;';
+    row4c.appendChild(cb4c);
+    row4c.appendChild(label4c);
+    container.appendChild(row4c);
+
     var row4c = document.createElement('div');
     row4c.style.cssText = 'margin-bottom: 8px; display: flex; align-items: center; gap: 8px;';
     var cb4c = document.createElement('input');
@@ -8516,6 +14754,26 @@ function createSettingPanel(sectionDiv) {
     row4b.appendChild(cb4b);
     row4b.appendChild(label4b);
     container.appendChild(row4b);
+
+    var rowDictPriorityPad = document.createElement('div');
+    rowDictPriorityPad.style.cssText = 'margin-bottom: 8px; display: flex; align-items: center; gap: 8px; user-select: text;';
+    var labelDictPriorityPad = document.createElement('label');
+    labelDictPriorityPad.textContent = '優先度固定補零長度:';
+    labelDictPriorityPad.style.cssText = 'font-size: 9pt; width: 180px; flex-shrink: 0; user-select: text;';
+    var inputDictPriorityPad = document.createElement('input');
+    inputDictPriorityPad.type = 'number';
+    inputDictPriorityPad.min = '1';
+    inputDictPriorityPad.max = '20';
+    inputDictPriorityPad.value = settings.dictPriorityPadLength || 5;
+    inputDictPriorityPad.style.cssText = 'width: 80px; border: 1px solid #5C0D12; background: #E0DED3; font-size: 9pt; padding: 2px 4px; height: 20px;';
+    inputDictPriorityPad.addEventListener('input', function() {
+        var v = parseInt(this.value, 10);
+        if (isNaN(v) || v < 1) this.value = 1;
+        if (v > 20) this.value = 20;
+    });
+    rowDictPriorityPad.appendChild(labelDictPriorityPad);
+    rowDictPriorityPad.appendChild(inputDictPriorityPad);
+    container.appendChild(rowDictPriorityPad);
 
     var rowLogConsole = document.createElement('div');
     rowLogConsole.style.cssText = 'margin-bottom: 8px; display: flex; align-items: center; gap: 8px; user-select: text;';
@@ -8881,6 +15139,8 @@ function createSettingPanel(sectionDiv) {
             nonJapaneseDefaultTranslated: cb4.checked,
             japaneseDefaultOfficialTextless: cb4c.checked,
             autoSwitchDictDropdown: cb4b.checked,
+            showDebugLogsInBrowserConsole: cb4c.checked,
+            dictPriorityPadLength: parseInt(inputDictPriorityPad.value, 10) || 5,
             deleteDoubleConfirm: cb5.checked,
             doubleConfirmMs: parseInt(input6.value, 10) || 1000,
             logToBrowserConsole: cbLogConsole.checked,
@@ -8952,9 +15212,10 @@ function createUnpublishedSection(btnRef) {
     var catGoBtn = createGoBtn(); catGoBtn.style.marginRight = '8px';
     catGoBtn.addEventListener('click', function(e) {
         e.preventDefault();
-        applyToChecked(tbody, function(tr1) {
-            var catSel = tr1.querySelector('td.gtc4 select');
-            if (catSel) catSel.value = toolCatSelect.value;
+        getCheckedGalleryGroupsFromTbody(tbody).forEach(function(group) {
+            var fields = getGalleryGroupFields(group);
+            if (!fields || !fields.categorySelect) return;
+            setGalleryGroupSelectValue(fields.categorySelect, toolCatSelect.value);
         });
     });
     toolRowDiv.appendChild(catGoBtn);
@@ -8965,9 +15226,10 @@ function createUnpublishedSection(btnRef) {
     var langGoBtn = createGoBtn(); langGoBtn.style.marginRight = '8px';
     langGoBtn.addEventListener('click', function(e) {
         e.preventDefault();
-        applyToChecked(tbody, function(tr1) {
-            var selects = tr1.querySelectorAll('td.gtc4 select');
-            if (selects[1]) selects[1].value = toolLangSelect.value;
+        getCheckedGalleryGroupsFromTbody(tbody).forEach(function(group) {
+            var fields = getGalleryGroupFields(group);
+            if (!fields || !fields.languageSelect) return;
+            setGalleryGroupSelectValue(fields.languageSelect, toolLangSelect.value);
         });
     });
     toolRowDiv.appendChild(langGoBtn);
@@ -8978,9 +15240,10 @@ function createUnpublishedSection(btnRef) {
     var folderGoBtn = createGoBtn(); folderGoBtn.style.marginRight = '8px';
     folderGoBtn.addEventListener('click', function(e) {
         e.preventDefault();
-        applyToChecked(tbody, function(tr1) {
-            var selects = tr1.querySelectorAll('td.gtc4 select');
-            if (selects[2]) selects[2].value = toolFolderSelect.value;
+        getCheckedGalleryGroupsFromTbody(tbody).forEach(function(group) {
+            var fields = getGalleryGroupFields(group);
+            if (!fields || !fields.folderSelect) return;
+            setGalleryGroupSelectValue(fields.folderSelect, toolFolderSelect.value);
         });
     });
     toolRowDiv.appendChild(folderGoBtn);
@@ -8988,8 +15251,10 @@ function createUnpublishedSection(btnRef) {
     var allLabel = document.createElement('span'); allLabel.textContent = 'All:'; allLabel.style.cssText = 'font-size: 9pt; vertical-align: middle;';
     toolRowDiv.appendChild(allLabel);
     var actionSelect = document.createElement('select');
-    applySelectStyle(actionSelect, '80px'); actionSelect.style.verticalAlign = 'middle';
-    ['Save', 'Create', 'Delete'].forEach(function(val) {
+    applySelectStyle(actionSelect, '112px'); actionSelect.style.verticalAlign = 'middle';
+    actionSelect.__fifybujAllActionSelect = true;
+    actionSelect.setAttribute('data-fifybuj-all-action-select', '1');
+    ['Save', 'Create', 'Delete', 'Romanization'].forEach(function(val) {
         var option = document.createElement('option');
         option.value = val;
         option.textContent = val;
@@ -9002,19 +15267,24 @@ function createUnpublishedSection(btnRef) {
         e.preventDefault();
         var action = actionSelect.value;
         if (action === 'Save') {
-            allSaveChecked(tbody, folderRow1);
-            actionGoBtn.style.backgroundColor = '#999999';
-            actionGoBtn.style.color = '#CCCCCC';
-            actionGoBtn.style.borderColor = '#999999';
-            setTimeout(function() {
-                actionGoBtn.style.backgroundColor = '#E0DED3';
-                actionGoBtn.style.color = '#5C0D12';
-                actionGoBtn.style.borderColor = '#5C0D12';
-            }, 500);
+            var savedCount = allSaveChecked(tbody, folderRow1);
+            if (savedCount > 0) flashButtonSavedState(actionGoBtn, '✓', 'GO', 1000);
+            else flashButtonErrorState(actionGoBtn, 'Fail', 'GO', 1000);
         } else if (action === 'Create') {
-            allCreateChecked(tbody);
+            var createdCount = allCreateChecked(tbody);
+            if (createdCount > 0) flashButtonSavedState(actionGoBtn, '✓', 'GO', 1000);
+            else flashButtonErrorState(actionGoBtn, 'Fail', 'GO', 1000);
         } else if (action === 'Delete') {
-            allDeleteChecked(tbody, folderRow1, waitingCreateCountRef);
+            triggerDeleteBySettings(actionGoBtn, function() {
+                var deletedCount = allDeleteChecked(tbody, folderRow1, waitingCreateCountRef);
+                if (deletedCount > 0) flashButtonSavedState(actionGoBtn, '✓', 'GO', 1000);
+                else flashButtonErrorState(actionGoBtn, 'Fail', 'GO', 1000);
+            });
+        } else if (action === 'Romanization') {
+            allRomanizationChecked(tbody).then(function(count) {
+                if (count > 0) flashButtonSavedState(actionGoBtn, '✓', 'GO', 1000);
+                else flashButtonErrorState(actionGoBtn, 'Fail', 'GO', 1000);
+            });
         }
     });
     toolRowDiv.appendChild(actionGoBtn);
@@ -9129,11 +15399,9 @@ function createUnpublishedSection(btnRef) {
     allSaveBtn.style.cssText = 'background-color: #E0DED3; border: 1px solid #5C0D12; color: #5C0D12; font-weight: bold; font-size: 8pt; padding: 0 4px; cursor: pointer; border-radius: 3px; white-space: normal; box-sizing: border-box; text-align: center; grid-area: as; align-self: stretch; word-break: keep-all; line-height: 1.4;';
     allSaveBtn.addEventListener('click', function(e) {
         e.preventDefault();
-        document.querySelectorAll('button').forEach(function(btn) {
-            if (btn.textContent === 'save' && btn.closest('tr')) {
-                btn.dispatchEvent(new MouseEvent('click', { bubbles: false, cancelable: true }));
-            }
-        });
+        var savedCount = allSaveChecked(tbody, folderRow1);
+        if (savedCount > 0) flashButtonSavedState(allSaveBtn, '✓', 'All Save', 1000);
+        else flashButtonErrorState(allSaveBtn, 'Fail', 'All Save', 1000);
     });
 
     optionsLeft.appendChild(createGalleryBtn2);
@@ -9159,26 +15427,32 @@ function createUnpublishedSection(btnRef) {
     optionsGoBtn.style.alignSelf = 'center';
     optionsGoBtn.addEventListener('click', function(e) {
         e.preventDefault();
-        applyToChecked(tbody, function(tr1, group) {
-            var tr2 = group[1];
-            var checkboxes = tr2.querySelectorAll('td.gtc-options input[type="checkbox"]');
-            if (checkboxes.length >= 12) {
-                checkboxes[1].checked = cbOpt_officialCb.checked;
-                checkboxes[4].checked = cbOpt_translatedCb.checked;
-                checkboxes[0].checked = cbOpt_mtlCb.checked;
-                checkboxes[7].checked = cbOpt_rewriteCb.checked;
-                checkboxes[10].checked = cbOpt_digitalCb.checked;
-                checkboxes[11].checked = cbOpt_sampleCb.checked;
-                checkboxes[5].checked = cbOpt_decensoredCb.checked;
-                checkboxes[2].checked = cbOpt_aiGeneratedCb.checked;
-                checkboxes[8].checked = cbOpt_colorizedCb.checked;
-                checkboxes[6].checked = cbOpt_incompleteCb.checked;
-                checkboxes[9].checked = cbOpt_ongoingCb.checked;
-                checkboxes[3].checked = cbOpt_anthologyCb.checked;
-                var mtlSpanEl = tr2.querySelector('td.gtc-options > span:first-child');
-                if (mtlSpanEl) { mtlSpanEl.style.display = cbOpt_translatedCb.checked ? 'inline-flex' : 'none'; }
-            }
+
+        var optionState = {
+            official: cbOpt_officialCb.checked,
+            translated: cbOpt_translatedCb.checked,
+            mtl: cbOpt_mtlCb.checked,
+            rewrite: cbOpt_rewriteCb.checked,
+            digital: cbOpt_digitalCb.checked,
+            sample: cbOpt_sampleCb.checked,
+            decensored: cbOpt_decensoredCb.checked,
+            aiGenerated: cbOpt_aiGeneratedCb.checked,
+            colorized: cbOpt_colorizedCb.checked,
+            incomplete: cbOpt_incompleteCb.checked,
+            ongoing: cbOpt_ongoingCb.checked,
+            anthology: cbOpt_anthologyCb.checked
+        };
+
+        var appliedCount = 0;
+        getCheckedGalleryGroupsFromTbody(tbody).forEach(function(group) {
+            var fields = getGalleryGroupFields(group);
+            if (!fields) return;
+            applyGalleryOptionStateToFields(fields, optionState);
+            appliedCount++;
         });
+
+        if (appliedCount > 0) flashButtonSavedState(optionsGoBtn, '✓', 'GO', 1000);
+        else flashButtonErrorState(optionsGoBtn, 'Fail', 'GO', 1000);
     });
 
     cleanBtn.addEventListener('click', function(e) {
@@ -9215,9 +15489,9 @@ function createUnpublishedSection(btnRef) {
 
     buttonRow.appendChild(analyzeBtn);
     buttonRow.appendChild(showFileListBtn);
-    buttonRow.appendChild(settingBtn);
     buttonRow.appendChild(commentTemplateBtn);
     buttonRow.appendChild(dictManagerBtn);
+    buttonRow.appendChild(settingBtn);
     buttonRow.appendChild(consoleBtn);
     sectionDiv.appendChild(buttonRow);
 
@@ -9233,19 +15507,13 @@ function createUnpublishedSection(btnRef) {
     var analyzeDropZone = document.createElement('div');
     analyzeDropZone.style.cssText = 'display: flex; gap: 8px; margin-bottom: 10px;';
     var archiveZone = document.createElement('div');
-    archiveZone.style.cssText = 'flex: 1; border: 2px dashed #5C0D12; border-radius: 6px; padding: 30px 20px; text-align: center; cursor: pointer; background-color: #EDE9DF; transition: background-color 0.2s;';
-    archiveZone.innerHTML = '<div style="font-size: 24px; margin-bottom: 8px;">📦</div><div style="font-size: 9pt; color: #5C0D12;">拖入壓縮檔<br>ZIP<br>或點擊選擇</div>';
+    archiveZone.style.cssText = 'flex: 1; border: 2px solid #5C0D12; border-radius: 6px; padding: 30px 20px; text-align: center; cursor: pointer; background-color: #EDE9DF;';
+    archiveZone.innerHTML = '<div style="font-size: 24px; margin-bottom: 8px;">📦</div><div style="font-size: 9pt; color: #5C0D12;">點擊選擇壓縮檔<br>ZIP</div>';
     var folderZone = document.createElement('div');
-    folderZone.style.cssText = 'flex: 1; border: 2px dashed #5C0D12; border-radius: 6px; padding: 30px 20px; text-align: center; cursor: pointer; background-color: #EDE9DF; transition: background-color 0.2s;';
-    folderZone.innerHTML = '<div style="font-size: 24px; margin-bottom: 8px;">📁</div><div style="font-size: 9pt; color: #5C0D12;">拖入/選擇<br>文件夾<br>或點擊選擇</div>';
+    folderZone.style.cssText = 'flex: 1; border: 2px solid #5C0D12; border-radius: 6px; padding: 30px 20px; text-align: center; cursor: pointer; background-color: #EDE9DF;';
+    folderZone.innerHTML = '<div style="font-size: 24px; margin-bottom: 8px;">📁</div><div style="font-size: 9pt; color: #5C0D12;">點擊選擇<br>文件夾</div>';
     analyzeDropZone.appendChild(archiveZone);
     analyzeDropZone.appendChild(folderZone);
-
-    var analyzeFileInput = document.createElement('input');
-    analyzeFileInput.type = 'file';
-    analyzeFileInput.accept = '.zip,.z01,.z02,.z03,.z04,.z05,.z06,.z07,.z08,.z09';
-    analyzeFileInput.multiple = true;
-    analyzeFileInput.style.display = 'none';
 
     var analyzeStatusBtn = document.createElement('div');
     analyzeStatusBtn.style.cssText = 'text-align: center; font-size: 9pt; color: #5C0D12; min-height: 20px; margin-bottom: 8px;';
@@ -9368,12 +15636,13 @@ function createUnpublishedSection(btnRef) {
     }
 
     function handleAnalyzeFolder() {
-        if (!window.showDirectoryPicker) {
-            warnLog('Analyze', 'showDirectoryPicker not supported');
-            return;
-        }
-        analyzeStatusBtn.textContent = '讀取文件夾中...';
-        window.showDirectoryPicker({ mode: 'read' }).then(function(dirHandle) {
+        analyzeStatusBtn.textContent = '';
+        analyzeStatusBtn.style.color = '#5C0D12';
+
+        selectAuthorizedDirectoryWithPicker().then(function(selection) {
+            var dirHandle = selection.handle;
+            var authorizedRootEntry = selection.authorizedRootEntry;
+            var relativeRootPath = buildAuthorizedRelativePathFromParts(selection.relativePathParts);
             var imageFiles = [];
             var skipped = 0;
 
@@ -9405,84 +15674,76 @@ function createUnpublishedSection(btnRef) {
             scanDir(dirHandle, '').then(function() {
                 imageFiles.sort(function(a, b) { return naturalCompare(a.path, b.path); });
                 if (imageFiles.length > MAX_FILES) { imageFiles = imageFiles.slice(0, MAX_FILES); }
-                var entry = { title: dirHandle.name, folderName: dirHandle.name, files: imageFiles, skipped: skipped };
+                var folderSourceLabel = relativeRootPath || dirHandle.name;
+                var storedFiles = createGallerySourcePrefixedFileEntries(imageFiles, relativeRootPath);
+                var entry = {
+                    title: dirHandle.name,
+                    folderName: relativeRootPath || '',
+                    sourceLabel: folderSourceLabel,
+                    authorizedRootId: authorizedRootEntry ? authorizedRootEntry.id : null,
+                    files: storedFiles,
+                    skipped: skipped
+                };
                 analyzeEntries.push(entry);
                 analyzeStatusBtn.textContent = '讀取完成';
-                setTimeout(function() { analyzeStatusBtn.textContent = ''; }, 2000);
-                renderAnalyzeResults();
-            });
-        }).catch(function(err) {
-            if (err.name !== 'AbortError') {
-                errorLog('AnalyzeFolder', '錯誤', err);
-                analyzeStatusBtn.textContent = '讀取失敗';
-                analyzeStatusBtn.style.color = '#CC0000';
                 setTimeout(function() {
                     analyzeStatusBtn.textContent = '';
                     analyzeStatusBtn.style.color = '#5C0D12';
                 }, 2000);
-            } else {
+                renderAnalyzeResults();
+            });
+        }).catch(function(err) {
+            if (err && err.name === 'AbortError') {
                 analyzeStatusBtn.textContent = '';
+                analyzeStatusBtn.style.color = '#5C0D12';
+                return;
             }
+
+            errorLog('AnalyzeFolder', '錯誤', err);
+            analyzeStatusBtn.textContent = '導入失敗：不在已授權文件夾內';
+            analyzeStatusBtn.style.color = '#CC0000';
+            setTimeout(function() {
+                analyzeStatusBtn.textContent = '';
+                analyzeStatusBtn.style.color = '#5C0D12';
+            }, 2500);
+        });
+    }
+
+    function handleAnalyzeArchiveSelection() {
+        analyzeStatusBtn.textContent = '';
+        analyzeStatusBtn.style.color = '#5C0D12';
+
+        selectAuthorizedArchiveFilesWithPicker().then(function(selection) {
+            handleAnalyzeFiles(selection.files || []);
+        }).catch(function(err) {
+            if (err && err.name === 'AbortError') {
+                analyzeStatusBtn.textContent = '';
+                analyzeStatusBtn.style.color = '#5C0D12';
+                return;
+            }
+
+            var displayMessage = getAuthorizedSelectionFailureDisplayMessage(err, '壓縮檔');
+            warnLog('Analyze', displayMessage, {
+                code: err && err.code,
+                message: err && (err.message || err)
+            });
+            analyzeStatusBtn.textContent = displayMessage;
+            analyzeStatusBtn.style.color = '#CC0000';
+            setTimeout(function() {
+                analyzeStatusBtn.textContent = '';
+                analyzeStatusBtn.style.color = '#5C0D12';
+            }, 2500);
         });
     }
 
     archiveZone.addEventListener('click', function(e) {
         e.preventDefault();
-        analyzeFileInput.click();
-    });
-    archiveZone.addEventListener('dragover', function(e) {
-        e.preventDefault();
-        e.stopPropagation();
-        archiveZone.style.backgroundColor = '#D0CEC3';
-    });
-    archiveZone.addEventListener('dragleave', function(e) {
-        e.preventDefault();
-        archiveZone.style.backgroundColor = '#EDE9DF';
-    });
-    archiveZone.addEventListener('drop', function(e) {
-        e.preventDefault();
-        e.stopPropagation();
-        archiveZone.style.backgroundColor = '#EDE9DF';
-        var files = Array.from(e.dataTransfer.files);
-        if (files.length > 0) { handleAnalyzeFiles(files); }
+        handleAnalyzeArchiveSelection();
     });
 
     folderZone.addEventListener('click', function(e) {
         e.preventDefault();
         handleAnalyzeFolder();
-    });
-    folderZone.addEventListener('dragover', function(e) {
-        e.preventDefault();
-        e.stopPropagation();
-        folderZone.style.backgroundColor = '#D0CEC3';
-    });
-    folderZone.addEventListener('dragleave', function(e) {
-        e.preventDefault();
-        folderZone.style.backgroundColor = '#EDE9DF';
-    });
-    folderZone.addEventListener('drop', function(e) {
-        e.preventDefault();
-        e.stopPropagation();
-        folderZone.style.backgroundColor = '#EDE9DF';
-        if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
-            var item = e.dataTransfer.items[0];
-            if (item.kind === 'file') {
-                var entry = item.webkitGetAsEntry();
-                if (entry && entry.isDirectory) {
-                    flowLog('Analyze', '拖入文件夾', entry.name);
-                    handleAnalyzeFolder();
-                    return;
-                }
-            }
-        }
-        var files = Array.from(e.dataTransfer.files);
-        if (files.length > 0) { handleAnalyzeFiles(files); }
-    });
-
-    analyzeFileInput.addEventListener('change', function() {
-        var files = Array.from(analyzeFileInput.files);
-        if (files.length > 0) { handleAnalyzeFiles(files); }
-        analyzeFileInput.value = '';
     });
 
     analyzeCreateAllBtn.addEventListener('click', function(e) {
@@ -9510,7 +15771,29 @@ function createUnpublishedSection(btnRef) {
             };
             existingGalleries.push(galleryData);
             if (entry.files && entry.files.length > 0) {
-                writeGalleryFileListById(galleryData.id, entry.folderName || null, entry.files);
+                if (entry.authorizedRootId != null) {
+                    var folderSourceLabel = entry.sourceLabel || entry.folderName || entry.title;
+                    writeGalleryFileListById(
+                        galleryData.id,
+                        entry.folderName || '',
+                        normalizeGalleryFileListEntries(entry.files),
+                        'folder',
+                        folderSourceLabel,
+                        [{ name: folderSourceLabel, type: 'folder' }],
+                        entry.authorizedRootId
+                    );
+                } else {
+                    var archiveRootName = getArchiveSourceLabelFromResult(entry);
+                    writeGalleryFileListById(
+                        galleryData.id,
+                        null,
+                        createGallerySourcePrefixedFileEntries(entry.files, archiveRootName),
+                        'archive',
+                        archiveRootName,
+                        [{ name: archiveRootName, type: 'archive' }],
+                        null
+                    );
+                }
             }
         });
         saveSavedGalleriesSafe(existingGalleries);
@@ -9544,7 +15827,6 @@ function createUnpublishedSection(btnRef) {
     });
 
     inputContainer.appendChild(analyzeDropZone);
-    inputContainer.appendChild(analyzeFileInput);
     inputContainer.appendChild(analyzeStatusBtn);
     inputContainer.appendChild(analyzeResultsDiv);
     inputContainer.appendChild(analyzeBottomRow);
@@ -9706,17 +15988,19 @@ function addScanFolderButton() {
     if (!createNewDiv) return;
 
     var newDiv = document.createElement('div');
+    newDiv.style.cssText = 'display: inline-block; margin-left: 0.5em;';
     var newLink = document.createElement('a');
     newLink.id = 'scan-folder-btn';
     newLink.href = '#';
     newLink.innerHTML = '[Scan Folder List]';
     newLink.style.fontWeight = 'normal';
     newDiv.appendChild(newLink);
+    newDiv.appendChild(document.createTextNode(' '));
 
     var localLink = document.createElement('a');
     localLink.id = 'local-folder-btn';
     localLink.href = '#';
-    localLink.innerHTML = ' [Local Folder]';
+    localLink.innerHTML = '[Local Folder]';
     localLink.style.fontWeight = 'normal';
     newDiv.appendChild(localLink);
 
@@ -9897,6 +16181,12 @@ function addAutoCreateButton() {
     lastDiv.insertAdjacentElement('afterend', newDiv);
     newLink.addEventListener('click', function(e) {
         e.preventDefault();
+        var existingSection = document.querySelector('.s[data-custom="true"]');
+        if (existingSection) {
+            existingSection.remove();
+            this.style.fontWeight = 'normal';
+            return;
+        }
         this.style.fontWeight = 'bold';
         createUnpublishedSection(this);
     });
@@ -9947,12 +16237,28 @@ function init() {
         GM_getValue('user_dicts', {});
     } catch (e) {}
 
+    if (!document.getElementById('fifybuj-dragging-cursor-style')) {
+        var style = document.createElement('style');
+        style.id = 'fifybuj-dragging-cursor-style';
+        style.textContent = `
+    body.is-dragging, body.is-dragging * {
+        cursor: grabbing !important;
+        user-select: none !important;
+    }
+`;
+        document.head.appendChild(style);
+    }
+
     _log('=== 庫載入檢查 ===');
     _log('JSZip:', typeof JSZip);
     _log('Kuroshiro:', typeof Kuroshiro);
     _log('KuromojiAnalyzer:', typeof KuromojiAnalyzer);
 
     initKuroshiro();
+
+    migrateLegacyAuthorizedRootFolderState().catch(function(err) {
+        warnLog('Settings', '授權文件夾遷移失敗', err && (err.message || err));
+    });
 
     setTimeout(function() {
         var retries = 0;
