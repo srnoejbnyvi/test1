@@ -67,6 +67,7 @@ function getDefaultSettings() {
     return {
         customRootFolder: '',
         customAuthorizedFolders: [],
+        defaultLocalFolder: 'Waiting Create',
         retryCount: 3,
         translatedDefaultMTL: true,
         nonJapaneseDefaultTranslated: false,
@@ -760,6 +761,78 @@ function normalizeGalleryFileListEntries(files) {
     return Array.isArray(files) ? files.map(normalizeGalleryFileListEntry) : [];
 }
 
+function normalizeArchiveSourceFileEntry(fileEntry) {
+    fileEntry = fileEntry || {};
+
+    var originalPath = String(fileEntry.originalPath || fileEntry.relativePath || fileEntry.path || '');
+    var originalName = String(fileEntry.originalName || fileEntry.name || getGalleryFileLeafNameFromPath(originalPath) || '');
+    var uploadName = String(fileEntry.uploadName || fileEntry.currentName || fileEntry.renamedName || fileEntry.displayName || originalName || '');
+    var authorizedRootId = fileEntry.authorizedRootId != null ? fileEntry.authorizedRootId : null;
+
+    if (!originalPath && originalName) originalPath = originalName;
+    if (!originalName && originalPath) originalName = getGalleryFileLeafNameFromPath(originalPath);
+    if (!uploadName) uploadName = originalName;
+
+    return {
+        name: originalName,
+        path: originalPath,
+        relativePath: originalPath,
+        originalName: originalName,
+        originalPath: originalPath,
+        uploadName: uploadName,
+        authorizedRootId: authorizedRootId
+    };
+}
+
+function normalizeArchiveSourceFileEntries(files) {
+    return Array.isArray(files) ? files.map(normalizeArchiveSourceFileEntry) : [];
+}
+
+function createArchiveSourceFileEntriesFromAuthorizedSelection(selection) {
+    var files = Array.isArray(selection && selection.files) ? selection.files : [];
+    var items = Array.isArray(selection && selection.items) ? selection.items : [];
+
+    return normalizeArchiveSourceFileEntries(files.map(function(fileObj, index) {
+        var item = items[index] || null;
+        var relativePath = item ? buildAuthorizedRelativePathFromParts(item.relativePathParts) : '';
+        var originalName = String((fileObj && fileObj.name) || '').trim();
+
+        if (!relativePath) relativePath = originalName;
+        if (!originalName) originalName = getGalleryFileLeafNameFromPath(relativePath);
+
+        return {
+            name: originalName,
+            path: relativePath,
+            relativePath: relativePath,
+            originalName: originalName,
+            originalPath: relativePath,
+            uploadName: originalName,
+            authorizedRootId: item && item.authorizedRootEntry ? item.authorizedRootEntry.id : null
+        };
+    }));
+}
+
+function buildArchiveSourceEntriesByGroupFromAuthorizedSelection(selection) {
+    var files = Array.isArray(selection && selection.files) ? selection.files : [];
+    var groups = identifyVolumeParts(files);
+    var allSourceEntries = createArchiveSourceFileEntriesFromAuthorizedSelection(selection);
+    var byGroup = {};
+
+    Object.keys(groups).forEach(function(groupKey) {
+        var group = groups[groupKey];
+        byGroup[groupKey] = normalizeArchiveSourceFileEntries(group.parts.slice().sort(function(a, b) {
+            return a.idx - b.idx;
+        }).map(function(part) {
+            var fileIndex = files.indexOf(part.file);
+            return fileIndex >= 0 ? allSourceEntries[fileIndex] : null;
+        }).filter(function(entry) {
+            return !!entry;
+        }));
+    });
+
+    return byGroup;
+}
+
 function getGalleryFileUploadName(fileEntry) {
     return normalizeGalleryFileListEntry(fileEntry).uploadName;
 }
@@ -815,6 +888,39 @@ function createGallerySourcePrefixedFileEntries(files, rootName) {
     });
 }
 
+function createPreciseFolderSourceFileEntries(files, rootName) {
+    var normalizedRootName = normalizeExactRelativeUploadPath(rootName);
+
+    return normalizeGalleryFileListEntries(files).map(function(fileEntry) {
+        var normalized = normalizeGalleryFileListEntry(fileEntry);
+        var basePath = normalizeExactRelativeUploadPath(
+            normalized.exactSourcePath ||
+            normalized.sourcePath ||
+            normalized.relativePath ||
+            normalized.originalPath ||
+            normalized.path ||
+            normalized.originalName ||
+            normalized.name ||
+            ''
+        );
+
+        if (!basePath) return mergePreciseSourceFieldsIntoGalleryFileEntry(normalized);
+
+        var exactPath = basePath;
+        if (normalizedRootName && exactPath !== normalizedRootName && exactPath.indexOf(normalizedRootName + '/') !== 0) {
+            exactPath = normalizedRootName + '/' + exactPath;
+        }
+
+        normalized.originalPath = exactPath;
+        normalized.path = exactPath;
+        normalized.relativePath = exactPath;
+        normalized.sourcePath = exactPath;
+        normalized.exactSourcePath = exactPath;
+
+        return mergePreciseSourceFieldsIntoGalleryFileEntry(normalized);
+    });
+}
+
 function createRenamedUploadFile(fileObj, uploadName) {
     if (!fileObj) return fileObj;
 
@@ -847,6 +953,7 @@ function readGalleryFileListById(galleryId) {
             sourceLabel: null,
             rootSources: [],
             authorizedRootId: null,
+            archiveSourceFiles: [],
             files: normalizeGalleryFileListEntries(data.slice())
         };
     }
@@ -862,6 +969,7 @@ function readGalleryFileListById(galleryId) {
             sourceLabel: rootSources[0] ? rootSources[0].name : (data.sourceLabel || null),
             rootSources: rootSources,
             authorizedRootId: data.authorizedRootId || null,
+            archiveSourceFiles: normalizeArchiveSourceFileEntries(data.archiveSourceFiles || []),
             files: normalizeGalleryFileListEntries(data.files.slice())
         };
     }
@@ -871,17 +979,21 @@ function readGalleryFileListById(galleryId) {
         sourceLabel: null,
         rootSources: [],
         authorizedRootId: null,
+        archiveSourceFiles: [],
         files: []
     };
 }
 
-function writeGalleryFileListById(galleryId, folderName, files, sourceType, sourceLabel, rootSources, authorizedRootId) {
+function writeGalleryFileListById(galleryId, folderName, files, sourceType, sourceLabel, rootSources, authorizedRootId, archiveSourceFiles) {
     var fileLists = getFileListsSafe();
     var existing = fileLists[galleryId] || {};
     var normalizedRootSources = normalizeGalleryRootSources(
         rootSources != null ? rootSources : existing.rootSources,
         sourceType != null ? sourceType : existing.sourceType,
         sourceLabel != null ? sourceLabel : existing.sourceLabel
+    );
+    var normalizedArchiveSourceFiles = normalizeArchiveSourceFileEntries(
+        archiveSourceFiles != null ? archiveSourceFiles : existing.archiveSourceFiles
     );
 
     if (!normalizedRootSources.length && (folderName || existing.folderName)) {
@@ -896,9 +1008,62 @@ function writeGalleryFileListById(galleryId, folderName, files, sourceType, sour
         sourceLabel: primarySource ? primarySource.name : (sourceLabel != null ? sourceLabel : (existing.sourceLabel || null)),
         rootSources: normalizedRootSources,
         authorizedRootId: authorizedRootId != null ? authorizedRootId : (existing.authorizedRootId || null),
+        archiveSourceFiles: normalizedArchiveSourceFiles,
         files: normalizeGalleryFileListEntries(files)
     };
     saveFileListsSafe(fileLists);
+}
+
+function saveOrQueueGalleryFileListForRow(tr2, savedDataId, payload) {
+    if (!tr2 || !payload) return;
+
+    var normalizedPayload = {
+        folderName: payload.folderName || null,
+        files: normalizeGalleryFileListEntries(payload.files),
+        sourceType: payload.sourceType || null,
+        sourceLabel: payload.sourceLabel || null,
+        rootSources: normalizeGalleryRootSources(
+            payload.rootSources,
+            payload.sourceType,
+            payload.sourceLabel || payload.folderName || null
+        ),
+        authorizedRootId: payload.authorizedRootId != null ? payload.authorizedRootId : null,
+        archiveSourceFiles: normalizeArchiveSourceFileEntries(payload.archiveSourceFiles)
+    };
+
+    if (savedDataId) {
+        writeGalleryFileListById(
+            savedDataId,
+            normalizedPayload.folderName,
+            normalizedPayload.files,
+            normalizedPayload.sourceType,
+            normalizedPayload.sourceLabel,
+            normalizedPayload.rootSources,
+            normalizedPayload.authorizedRootId,
+            normalizedPayload.archiveSourceFiles
+        );
+        delete tr2.__pendingGalleryFileListPayload;
+        return;
+    }
+
+    tr2.__pendingGalleryFileListPayload = normalizedPayload;
+}
+
+function flushPendingFileListDataForGalleryRow(tr2, savedDataId) {
+    if (!tr2 || !savedDataId || !tr2.__pendingGalleryFileListPayload) return;
+
+    var payload = tr2.__pendingGalleryFileListPayload;
+    writeGalleryFileListById(
+        savedDataId,
+        payload.folderName,
+        payload.files,
+        payload.sourceType,
+        payload.sourceLabel,
+        payload.rootSources,
+        payload.authorizedRootId,
+        payload.archiveSourceFiles
+    );
+    delete tr2.__pendingGalleryFileListPayload;
 }
 
 function deleteGalleryFileListById(galleryId) {
@@ -1132,7 +1297,7 @@ function _initKuroshiroInternal() {
                     matched = true;
                 }
             });
-            if (matched) _debug('[Dict] XHR 攔截 →', url.substring(0, 50));
+            if (matched && window.location.pathname.indexOf('/managegallery') === -1) _debug('[Dict] XHR 攔截 →', url.substring(0, 50));
             this._intercepted = matched;
             return origOpen.call(this, method, url);
         };
@@ -1908,6 +2073,23 @@ function handleManageGalleryPage() {
 
     flowLog('AutoCreate', 'handleManageGalleryPage 開始', window.location.href);
 
+    var initialUlgidMatch = window.location.href.match(/[?&]ulgid=(\d+)/);
+    var initialUlgid = initialUlgidMatch ? initialUlgidMatch[1] : null;
+
+    if (initialUlgid) {
+        uploadDebugFlushPersistent('managegallery_upload_page_enter', {
+            href: window.location.href,
+            pathname: window.location.pathname,
+            currentUlgid: initialUlgid
+        });
+    }
+
+    uploadDebugLog('handleManageGalleryPage:enter', {
+        href: window.location.href,
+        pathname: window.location.pathname,
+        currentUlgid: initialUlgid
+    });
+
     var data = GM_getValue('pending_create', null);
     var isFromQueue = false;
     if (!data) {
@@ -1919,9 +2101,153 @@ function handleManageGalleryPage() {
             flowLog('AutoCreate', '從 queue 取得', { id: data ? data.id : 'null', remain: queue.length });
         }
     }
-    _debug('[AutoCreate] pending_create:', data ? data.id : 'null');
+    if (!initialUlgid) {
+        _debug('[AutoCreate] pending_create:', data ? data.id : 'null');
+    }
+
+    if (data) {
+        uploadDebugClearPersistent('new_pending_create_detected', {
+            href: window.location.href,
+            pendingCreateId: data ? data.id : null,
+            savedDataId: data ? (data.savedDataId || null) : null,
+            isFromQueue: isFromQueue
+        });
+        uploadDebugLog('handleManageGalleryPage:persistent_debug_reset_for_create', {
+            pendingCreateId: data ? data.id : null,
+            savedDataId: data ? (data.savedDataId || null) : null,
+            isFromQueue: isFromQueue
+        });
+
+        writeCreateToUploadSessionBridge({
+            pendingCreateId: data ? (data.id || null) : null,
+            savedDataId: data ? (data.savedDataId || null) : null,
+            title1: data ? (data.title1 || null) : null,
+            title2: data ? (data.title2 || null) : null,
+            sourceType: data ? (data.sourceType || null) : null,
+            createFlowToken: data ? (data.createFlowToken || null) : null,
+            createTriggerSource: data ? (data.createTriggerSource || null) : null,
+            bridgeStage: 'create_page_loaded',
+            autoUploadEligible: true,
+            consumed: false,
+            createdAt: Date.now(),
+            createPageHref: window.location.href,
+            href: window.location.href
+        });
+        uploadDebugLog('handleManageGalleryPage:create_to_upload_bridge_prepared', {
+            pendingCreateId: data ? data.id : null,
+            savedDataId: data ? (data.savedDataId || null) : null,
+            isFromQueue: isFromQueue
+        });
+    }
+
+    uploadDebugLog('handleManageGalleryPage:pending_create_state', {
+        hasPendingCreate: !!data,
+        pendingCreateId: data ? data.id : null,
+        savedDataId: data ? (data.savedDataId || null) : null,
+        isFromQueue: isFromQueue
+    });
 
     if (!data) {
+        var pendingUploadRaw = GM_getValue('pending_upload', null);
+        var currentUlgidMatch = window.location.href.match(/[?&]ulgid=(\d+)/);
+        var currentUlgid = currentUlgidMatch ? currentUlgidMatch[1] : null;
+        var currentReferrer = String(document.referrer || '').trim();
+        var sessionBridge = readCreateToUploadSessionBridge();
+        var pendingUploadState = resolvePendingUploadForCurrentPage(currentUlgid, pendingUploadRaw, sessionBridge, currentReferrer);
+        var pendingUpload = pendingUploadState.resolvedPendingUpload;
+        var shouldStartPendingUpload = !!pendingUploadState.shouldStartPendingUpload;
+
+        if (
+            sessionBridge &&
+            currentUlgid &&
+            shouldStartPendingUpload &&
+            pendingUpload &&
+            String((pendingUpload && pendingUpload.savedDataId) || '').trim() &&
+            !String((sessionBridge && sessionBridge.ulgid) || '').trim()
+        ) {
+            sessionBridge = Object.assign({}, sessionBridge, {
+                ulgid: currentUlgid,
+                href: window.location.href,
+                bridgeStage: 'upload_page_verified',
+                updatedAt: Date.now()
+            });
+            writeCreateToUploadSessionBridge(sessionBridge);
+            uploadDebugWarn('handleManageGalleryPage:session_bridge_backfilled_with_current_ulgid', {
+                currentUlgid: currentUlgid,
+                pendingUpload: pendingUpload,
+                sessionBridge: sessionBridge,
+                resolutionReason: pendingUploadState.resolutionReason
+            });
+        }
+
+        if (pendingUpload && (
+            !pendingUploadRaw ||
+            String((pendingUploadRaw && pendingUploadRaw.ulgid) || '').trim() !== String((pendingUpload && pendingUpload.ulgid) || '').trim() ||
+            String((pendingUploadRaw && pendingUploadRaw.savedDataId) || '').trim() !== String((pendingUpload && pendingUpload.savedDataId) || '').trim()
+        )) {
+            GM_setValue('pending_upload', pendingUpload);
+
+            uploadDebugWarn('handleManageGalleryPage:pending_upload_restored_from_trusted_session_bridge', {
+                currentUlgid: currentUlgid,
+                pendingUploadRaw: pendingUploadRaw,
+                pendingUpload: pendingUpload,
+                sessionBridge: sessionBridge,
+                resolutionReason: pendingUploadState.resolutionReason
+            });
+        }
+
+        uploadDebugLog('handleManageGalleryPage:pending_upload_check', {
+            pendingUploadRaw: pendingUploadRaw,
+            pendingUpload: pendingUpload,
+            currentUlgid: currentUlgid,
+            currentReferrer: currentReferrer,
+            sessionBridge: sessionBridge,
+            resolutionSource: pendingUploadState.resolutionSource,
+            resolutionReason: pendingUploadState.resolutionReason,
+            shouldStartPendingUpload: shouldStartPendingUpload
+        });
+
+        if (shouldStartPendingUpload) {
+            flowLog('Upload', '偵測到 pending_upload，開始接手', pendingUpload);
+            uploadDebugLog('handleManageGalleryPage:start_pending_upload', {
+                savedDataId: pendingUpload.savedDataId,
+                ulgid: pendingUpload.ulgid,
+                flowToken: pendingUpload.flowToken || null,
+                restoredFrom: pendingUpload.restoredFrom || null,
+                resolutionSource: pendingUploadState.resolutionSource,
+                resolutionReason: pendingUploadState.resolutionReason
+            });
+            clearCreateToUploadSessionBridge('upload_start_once_gate_consumed', {
+                currentUlgid: currentUlgid,
+                pendingUpload: pendingUpload,
+                resolutionReason: pendingUploadState.resolutionReason
+            });
+            startFolderUpload(pendingUpload.savedDataId);
+            return;
+        }
+
+        if (pendingUploadRaw && currentUlgid && String((pendingUploadRaw && pendingUploadRaw.ulgid) || '').trim() !== String(currentUlgid).trim()) {
+            uploadDebugWarn('handleManageGalleryPage:stale_pending_upload_ignored', {
+                pendingUploadRaw: pendingUploadRaw,
+                currentUlgid: currentUlgid,
+                sessionBridge: sessionBridge,
+                resolutionReason: pendingUploadState.resolutionReason
+            });
+        }
+
+        if ((pendingUploadRaw || sessionBridge) && currentUlgid) {
+            notifyPendingUploadResolutionFailureOnce(currentUlgid, pendingUploadState);
+        }
+
+        uploadDebugWarn('handleManageGalleryPage:no_pending_create_or_upload', {
+            pendingUploadRaw: pendingUploadRaw,
+            pendingUpload: pendingUpload,
+            currentUlgid: currentUlgid,
+            currentReferrer: currentReferrer,
+            sessionBridge: sessionBridge,
+            resolutionSource: pendingUploadState.resolutionSource,
+            resolutionReason: pendingUploadState.resolutionReason
+        });
         flowLog('AutoCreate', '無 pending_create，退出');
         return;
     }
@@ -2061,27 +2387,109 @@ function handleManageGalleryPage() {
                         xhrDone = true;
                         XMLHttpRequest.prototype.open = origOpen;
                         XMLHttpRequest.prototype.send = origSend;
-                        opLog('圖庫創建成功', { savedDataId: data.savedDataId || null, title: data.title1 || data.title2 || '' });
-                        if (data.savedDataId) {
-                            GM_setValue('create_success', data.savedDataId);
-                            _debug('[AutoCreate] create_success 已設置:', data.savedDataId);
-                        }
-                        var ulgidMatch = xhr.responseURL ? xhr.responseURL.match(/ulgid=(\d+)/) : null;
+
+                        var savedGalleryId = data.savedDataId || null;
+                        opLog('圖庫創建成功', { savedDataId: savedGalleryId, title: data.title1 || data.title2 || '' });
+                        uploadDebugLog('handleManageGalleryPage:create_success_detected', {
+                            savedDataId: savedGalleryId,
+                            pendingCreateData: data,
+                            responseURL: xhr.responseURL || null,
+                            currentHref: window.location.href
+                        });
+
+                        var ulgidMatch = xhr.responseURL ? xhr.responseURL.match(/[?&]ulgid=(\d+)/) : null;
                         if (!ulgidMatch) {
                             var docUrl = doc.querySelector('a[href*="ulgid"]');
-                            if (docUrl) ulgidMatch = docUrl.href.match(/ulgid=(\d+)/);
+                            if (docUrl) ulgidMatch = docUrl.href.match(/[?&]ulgid=(\d+)/) || docUrl.href.match(/ulgid=(\d+)/);
                         }
-                        if (ulgidMatch && data.savedDataId) {
-                            var ulgid = ulgidMatch[1];
+                        if (!ulgidMatch && xhr.responseText) {
+                            ulgidMatch = xhr.responseText.match(/[?&]ulgid=(\d+)/) || xhr.responseText.match(/ulgid=(\d+)/);
+                        }
+                        if (!ulgidMatch) {
+                            var currentLocationMatch = window.location.href.match(/[?&]ulgid=(\d+)/);
+                            if (currentLocationMatch) ulgidMatch = currentLocationMatch;
+                        }
+
+                        var ulgid = ulgidMatch ? ulgidMatch[1] : null;
+                        uploadDebugLog('handleManageGalleryPage:create_success_ulgid_resolved', {
+                            savedDataId: savedGalleryId,
+                            ulgid: ulgid,
+                            hasUlgidMatch: !!ulgidMatch
+                        });
+
+                        if (ulgid && savedGalleryId) {
                             flowLog('AutoCreate', '取得 ulgid，準備儲存上傳任務', ulgid);
-                            var pendingUpload = { ulgid: ulgid, savedDataId: data.savedDataId };
+                            var pendingUpload = {
+                                ulgid: ulgid,
+                                savedDataId: savedGalleryId,
+                                flowToken: data ? (data.createFlowToken || null) : null,
+                                restoredFrom: 'create_success_detected'
+                            };
+
+                            var sessionBridgeSnapshot = readCreateToUploadSessionBridge() || {};
+                            writeCreateToUploadSessionBridge(Object.assign({}, sessionBridgeSnapshot, {
+                                pendingCreateId: data ? (data.id || null) : (sessionBridgeSnapshot.pendingCreateId || null),
+                                savedDataId: savedGalleryId,
+                                title1: data ? (data.title1 || null) : (sessionBridgeSnapshot.title1 || null),
+                                title2: data ? (data.title2 || null) : (sessionBridgeSnapshot.title2 || null),
+                                sourceType: data ? (data.sourceType || null) : (sessionBridgeSnapshot.sourceType || null),
+                                createFlowToken: data ? (data.createFlowToken || null) : (sessionBridgeSnapshot.createFlowToken || null),
+                                createTriggerSource: data ? (data.createTriggerSource || null) : (sessionBridgeSnapshot.createTriggerSource || null),
+                                ulgid: ulgid,
+                                bridgeStage: 'create_success_detected',
+                                autoUploadEligible: true,
+                                consumed: false,
+                                submittedAt: sessionBridgeSnapshot.submittedAt || Date.now(),
+                                createdAt: Date.now(),
+                                updatedAt: Date.now(),
+                                createPageHref: sessionBridgeSnapshot.createPageHref || window.location.href,
+                                href: 'https://upload.e-hentai.org/managegallery?ulgid=' + ulgid
+                            }));
+                            uploadDebugLog('handleManageGalleryPage:create_to_upload_bridge_updated_with_ulgid', {
+                                pendingCreateId: data ? (data.id || null) : null,
+                                savedDataId: savedGalleryId,
+                                ulgid: ulgid
+                            });
+
                             GM_setValue('pending_upload', pendingUpload);
+                            uploadDebugLog('handleManageGalleryPage:pending_upload_saved', pendingUpload);
                             flowLog('AutoCreate', 'pending_upload 已儲存，準備跳轉');
+                        } else if (!ulgid) {
+                            uploadDebugError('handleManageGalleryPage:pending_upload_not_saved_missing_ulgid', {
+                                savedDataId: savedGalleryId,
+                                responseURL: xhr.responseURL || null,
+                                currentHref: window.location.href
+                            });
+                            warnLog('AutoCreate', '無法取得 ulgid，跳過上傳');
+                        } else {
+                            uploadDebugError('handleManageGalleryPage:pending_upload_not_saved_missing_savedDataId', {
+                                savedDataId: savedGalleryId,
+                                pendingCreateData: data,
+                                ulgid: ulgid
+                            });
+                            warnLog('AutoCreate', '缺少 savedDataId，跳過上傳');
+                        }
+
+                        if (savedGalleryId) {
+                            GM_setValue('create_success', savedGalleryId);
+                            _debug('[AutoCreate] create_success 已設置:', savedGalleryId);
+                            uploadDebugLog('handleManageGalleryPage:create_success_saved', {
+                                savedDataId: savedGalleryId
+                            });
+                        } else {
+                            uploadDebugError('handleManageGalleryPage:create_success_not_saved_missing_savedDataId', {
+                                pendingCreateData: data
+                            });
+                        }
+
+                        if (ulgid && savedGalleryId) {
                             setTimeout(function() {
+                                uploadDebugLog('handleManageGalleryPage:redirect_to_upload_page', {
+                                    ulgid: ulgid,
+                                    savedDataId: savedGalleryId
+                                });
                                 window.location.href = 'https://upload.e-hentai.org/managegallery?ulgid=' + ulgid;
                             }, 800);
-                        } else {
-                            warnLog('AutoCreate', '無法取得 ulgid，跳過上傳');
                         }
                     } else {
                         retryCount++;
@@ -2113,6 +2521,21 @@ function handleManageGalleryPage() {
                 saveBtnClicked = true;
                 clearInterval(waitInterval);
                 flowLog('AutoCreate', 'savebutton 已啟用，點擊中');
+                writeCreateToUploadSessionBridge(Object.assign({}, readCreateToUploadSessionBridge() || {}, {
+                    pendingCreateId: data ? (data.id || null) : null,
+                    savedDataId: data ? (data.savedDataId || null) : null,
+                    title1: data ? (data.title1 || null) : null,
+                    title2: data ? (data.title2 || null) : null,
+                    sourceType: data ? (data.sourceType || null) : null,
+                    createFlowToken: data ? (data.createFlowToken || null) : null,
+                    createTriggerSource: data ? (data.createTriggerSource || null) : null,
+                    bridgeStage: 'create_submitted',
+                    autoUploadEligible: true,
+                    consumed: false,
+                    submittedAt: Date.now(),
+                    createPageHref: window.location.href,
+                    href: window.location.href
+                }));
                 sb.click();
                 sb.disabled = true;
                 _debug('[AutoCreate] savebutton 已點擊');
@@ -2138,99 +2561,1181 @@ function handleManageGalleryPage() {
 
 // ==================== startFolderUpload ====================
 
-function startFolderUpload(savedDataId) {
-    flowLog('Upload', 'startFolderUpload 開始', savedDataId);
+var UPLOAD_DEBUG_TRACE_KEY = 'fifybuj_upload_debug_trace';
 
-    var fileListEntry = readGalleryFileListById(savedDataId);
-    if (!fileListEntry || !fileListEntry.files || fileListEntry.files.length === 0) {
-        warnLog('Upload', '無文件列表，跳過上傳', savedDataId);
-        return;
+function uploadDebugNormalizeValue(value) {
+    if (value === null || value === undefined) return value;
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
+    if (value instanceof Error) {
+        return {
+            message: value.message || String(value),
+            stack: value.stack || ''
+        };
     }
+    try {
+        return JSON.parse(JSON.stringify(value));
+    } catch (e) {}
+    try {
+        return String(value);
+    } catch (e2) {}
+    return '[Unserializable]';
+}
 
-    var files = fileListEntry.files;
-    flowLog('Upload', '文件資訊', {
-        folderName: fileListEntry.folderName || null,
-        authorizedRootId: fileListEntry.authorizedRootId || null,
-        count: files.length
-    });
+function uploadDebugAppendPersistent(level, args) {
+    try {
+        var records = GM_getValue(UPLOAD_DEBUG_TRACE_KEY, []);
+        if (!Array.isArray(records)) records = [];
 
-    if (fileListEntry.sourceType !== 'folder') {
-        warnLog('Upload', '非文件夾來源，跳過上傳');
-        return;
-    }
+        records.push({
+            time: new Date().toISOString(),
+            level: level,
+            args: Array.prototype.slice.call(args || []).map(uploadDebugNormalizeValue)
+        });
 
-    getAuthorizedRootHandleByIdOrLegacy(fileListEntry.authorizedRootId).then(function(rootHandle) {
-        if (!rootHandle) {
-            errorLog('Upload', '無已授權文件夾 handle，請在 Setting 中設定授權文件夾');
-            return;
+        if (records.length > 200) {
+            records = records.slice(-200);
         }
 
-        return requestReadPermissionIfNeeded(rootHandle).then(function(canRead) {
-            if (!canRead) {
-                errorLog('Upload', '授權文件夾無讀取權限');
+        GM_setValue(UPLOAD_DEBUG_TRACE_KEY, records);
+    } catch (e) {}
+}
+
+function uploadDebugClearPersistent(reason, payload) {
+    try {
+        GM_setValue(UPLOAD_DEBUG_TRACE_KEY, []);
+    } catch (e) {}
+
+    uploadDebugConsole('info', ['[PersistedDebug] clear', {
+        reason: reason || '',
+        payload: uploadDebugNormalizeValue(payload)
+    }]);
+}
+
+function uploadDebugFlushPersistent(reason, payload) {
+    var records = [];
+    try {
+        records = GM_getValue(UPLOAD_DEBUG_TRACE_KEY, []);
+    } catch (e) {
+        records = [];
+    }
+
+    if (!Array.isArray(records) || !records.length) {
+        uploadDebugConsole('info', ['[PersistedDebug] flush_empty', {
+            reason: reason || '',
+            payload: uploadDebugNormalizeValue(payload)
+        }]);
+        return [];
+    }
+
+    uploadDebugConsole('info', ['[PersistedDebug] flush_begin', {
+        reason: reason || '',
+        payload: uploadDebugNormalizeValue(payload),
+        count: records.length
+    }]);
+
+    records.forEach(function(record, index) {
+        uploadDebugConsole(record && record.level ? record.level : 'log', [
+            '[PersistedDebug #' + (index + 1) + ']',
+            record && record.time ? record.time : ''
+        ].concat(record && Array.isArray(record.args) ? record.args : []));
+    });
+
+    try {
+        GM_setValue(UPLOAD_DEBUG_TRACE_KEY, []);
+    } catch (e2) {}
+
+    uploadDebugConsole('info', ['[PersistedDebug] flush_end', {
+        reason: reason || '',
+        count: records.length
+    }]);
+
+    return records;
+}
+
+function uploadDebugConsole(level, args) {
+    var list = Array.prototype.slice.call(args || []);
+    list.unshift('[UploadDebug]');
+
+    var method = console.log;
+    if (level === 'warn' && console.warn) method = console.warn;
+    else if (level === 'error' && console.error) method = console.error;
+    else if (level === 'info' && console.info) method = console.info;
+
+    try {
+        method.apply(console, list);
+    } catch (e) {}
+}
+
+function uploadDebugLog() {
+    uploadDebugAppendPersistent('log', arguments);
+    uploadDebugConsole('log', arguments);
+}
+
+function uploadDebugWarn() {
+    uploadDebugAppendPersistent('warn', arguments);
+    uploadDebugConsole('warn', arguments);
+}
+
+function uploadDebugError() {
+    uploadDebugAppendPersistent('error', arguments);
+    uploadDebugConsole('error', arguments);
+}
+
+var CREATE_TO_UPLOAD_SESSION_BRIDGE_KEY = 'fifybuj_create_to_upload_session_bridge';
+
+function readCreateToUploadSessionBridge() {
+    try {
+        var raw = sessionStorage.getItem(CREATE_TO_UPLOAD_SESSION_BRIDGE_KEY);
+        if (!raw) return null;
+
+        var parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return null;
+        return parsed;
+    } catch (e) {
+        uploadDebugError('createToUploadSessionBridge:read_error', {
+            message: e && e.message,
+            stack: e && e.stack
+        });
+        return null;
+    }
+}
+
+function writeCreateToUploadSessionBridge(payload) {
+    var normalizedPayload = uploadDebugNormalizeValue(payload) || {};
+    try {
+        sessionStorage.setItem(CREATE_TO_UPLOAD_SESSION_BRIDGE_KEY, JSON.stringify(normalizedPayload));
+        uploadDebugLog('createToUploadSessionBridge:written', normalizedPayload);
+        return true;
+    } catch (e) {
+        uploadDebugError('createToUploadSessionBridge:write_error', {
+            payload: normalizedPayload,
+            message: e && e.message,
+            stack: e && e.stack
+        });
+        return false;
+    }
+}
+
+function clearCreateToUploadSessionBridge(reason, payload) {
+    var previous = null;
+
+    try {
+        previous = readCreateToUploadSessionBridge();
+    } catch (e) {}
+
+    try {
+        sessionStorage.removeItem(CREATE_TO_UPLOAD_SESSION_BRIDGE_KEY);
+    } catch (e2) {
+        uploadDebugError('createToUploadSessionBridge:clear_error', {
+            reason: reason || '',
+            payload: uploadDebugNormalizeValue(payload),
+            message: e2 && e2.message,
+            stack: e2 && e2.stack
+        });
+        return false;
+    }
+
+    uploadDebugLog('createToUploadSessionBridge:cleared', {
+        reason: reason || '',
+        payload: uploadDebugNormalizeValue(payload),
+        previous: previous
+    });
+    return true;
+}
+
+function resolvePendingUploadForCurrentPage(currentUlgid, pendingUpload, sessionBridge, currentReferrer) {
+    var normalizedCurrentUlgid = String(currentUlgid || '').trim();
+    var normalizedReferrer = String(currentReferrer || '').trim();
+    var normalizedPendingUlgid = pendingUpload && pendingUpload.ulgid != null ? String(pendingUpload.ulgid).trim() : '';
+    var normalizedPendingSavedDataId = pendingUpload && pendingUpload.savedDataId != null ? String(pendingUpload.savedDataId).trim() : '';
+    var normalizedPendingFlowToken = pendingUpload && pendingUpload.flowToken != null ? String(pendingUpload.flowToken).trim() : '';
+    var normalizedBridgeUlgid = sessionBridge && sessionBridge.ulgid != null ? String(sessionBridge.ulgid).trim() : '';
+    var normalizedBridgeSavedDataId = sessionBridge && sessionBridge.savedDataId != null ? String(sessionBridge.savedDataId).trim() : '';
+    var normalizedBridgeFlowToken = sessionBridge && sessionBridge.createFlowToken != null ? String(sessionBridge.createFlowToken).trim() : '';
+    var normalizedBridgeStage = String((sessionBridge && sessionBridge.bridgeStage) || '').trim();
+    var normalizedCreatePageHref = String((sessionBridge && sessionBridge.createPageHref) || (sessionBridge && sessionBridge.href) || '').trim();
+    var submittedAt = sessionBridge && sessionBridge.submittedAt != null ? parseInt(sessionBridge.submittedAt, 10) : NaN;
+    var bridgeTimestamp = sessionBridge && sessionBridge.updatedAt != null ? parseInt(sessionBridge.updatedAt, 10) : NaN;
+    var acceptedBridgeStage = !normalizedBridgeStage ||
+        normalizedBridgeStage === 'create_submitted' ||
+        normalizedBridgeStage === 'create_success_detected' ||
+        normalizedBridgeStage === 'upload_page_verified';
+
+    if (!isFinite(bridgeTimestamp)) bridgeTimestamp = sessionBridge && sessionBridge.createdAt != null ? parseInt(sessionBridge.createdAt, 10) : NaN;
+    if (!isFinite(bridgeTimestamp)) bridgeTimestamp = submittedAt;
+
+    var result = {
+        rawPendingUpload: pendingUpload || null,
+        sessionBridge: sessionBridge || null,
+        resolvedPendingUpload: null,
+        shouldStartPendingUpload: false,
+        resolutionSource: 'none',
+        resolutionReason: 'NO_PENDING_UPLOAD_CONTEXT'
+    };
+
+    if (!normalizedCurrentUlgid) {
+        result.resolutionReason = 'CURRENT_ULGID_MISSING';
+        return result;
+    }
+
+    if (sessionBridge) {
+        if (sessionBridge.consumed === true) {
+            result.resolutionReason = 'SESSION_BRIDGE_ALREADY_CONSUMED';
+        } else if (sessionBridge.autoUploadEligible === false) {
+            result.resolutionReason = 'SESSION_BRIDGE_NOT_ELIGIBLE';
+        } else if (!normalizedBridgeSavedDataId) {
+            result.resolutionReason = 'SESSION_BRIDGE_SAVED_DATA_ID_MISSING';
+        } else if (!normalizedBridgeFlowToken) {
+            result.resolutionReason = 'SESSION_BRIDGE_FLOW_TOKEN_MISSING';
+        } else if (!acceptedBridgeStage) {
+            result.resolutionReason = 'SESSION_BRIDGE_STAGE_INVALID';
+        } else if (normalizedBridgeUlgid && normalizedBridgeUlgid !== normalizedCurrentUlgid) {
+            result.resolutionReason = 'SESSION_BRIDGE_ULGID_MISMATCH';
+        } else if (!isFinite(bridgeTimestamp)) {
+            result.resolutionReason = 'SESSION_BRIDGE_SUBMITTED_AT_MISSING';
+        } else if (Date.now() - bridgeTimestamp > 5 * 60 * 1000) {
+            result.resolutionReason = 'SESSION_BRIDGE_SUBMIT_TIMEOUT';
+        } else {
+            result.resolvedPendingUpload = {
+                ulgid: normalizedCurrentUlgid,
+                savedDataId: normalizedBridgeSavedDataId,
+                flowToken: normalizedBridgeFlowToken,
+                restoredFrom: normalizedBridgeUlgid
+                    ? 'trusted_create_to_upload_bridge_match'
+                    : 'trusted_create_to_upload_bridge_backfilled_current_ulgid'
+            };
+            result.shouldStartPendingUpload = true;
+            result.resolutionSource = 'trusted_session_bridge';
+            result.resolutionReason = normalizedBridgeUlgid
+                ? 'TRUSTED_CREATE_TO_UPLOAD_BRIDGE_MATCHED'
+                : 'TRUSTED_CREATE_TO_UPLOAD_BRIDGE_BACKFILLED_CURRENT_ULGID';
+            return result;
+        }
+    }
+
+    if (normalizedPendingUlgid && normalizedPendingUlgid === normalizedCurrentUlgid && normalizedPendingSavedDataId) {
+        result.resolvedPendingUpload = {
+            ulgid: normalizedCurrentUlgid,
+            savedDataId: normalizedPendingSavedDataId,
+            flowToken: normalizedPendingFlowToken || normalizedBridgeFlowToken || '',
+            restoredFrom: 'pending_upload_exact_match'
+        };
+        result.shouldStartPendingUpload = true;
+        result.resolutionSource = 'pending_upload';
+        result.resolutionReason = 'PENDING_UPLOAD_EXACT_MATCH';
+        return result;
+    }
+
+    if (!sessionBridge && normalizedPendingUlgid && normalizedPendingUlgid !== normalizedCurrentUlgid) {
+        result.resolutionReason = 'PENDING_UPLOAD_ULGID_MISMATCH';
+        return result;
+    }
+
+    if (!sessionBridge && normalizedPendingSavedDataId) {
+        result.resolutionReason = normalizedPendingUlgid ? 'PENDING_UPLOAD_NO_MATCH' : 'PENDING_UPLOAD_NO_ULGID';
+        return result;
+    }
+
+    if (!sessionBridge) {
+        result.resolutionReason = normalizedReferrer ? 'SESSION_BRIDGE_MISSING' : 'NO_PENDING_UPLOAD_CONTEXT';
+        return result;
+    }
+
+    if (!result.resolutionReason || result.resolutionReason === 'NO_PENDING_UPLOAD_CONTEXT') {
+        result.resolutionReason = normalizedCreatePageHref ? 'SESSION_BRIDGE_NOT_READY' : 'SESSION_BRIDGE_MISSING';
+    }
+
+    return result;
+}
+
+var UPLOAD_HANDOFF_ALERT_PREFIX_KEY = 'fifybuj_upload_handoff_alerted';
+
+function getPendingUploadResolutionFailureMessage(pendingUploadState) {
+    var reason = String((pendingUploadState && pendingUploadState.resolutionReason) || '').trim();
+
+    if (!reason) return '自動上傳未啟動：未知原因';
+
+    if (reason === 'CURRENT_ULGID_MISSING') {
+        return '自動上傳未啟動：目前頁面缺少 ulgid，無法確認上傳目標圖庫。';
+    }
+    if (reason === 'SESSION_BRIDGE_MISSING') {
+        return '自動上傳未啟動：這不是腳本從 act=new 流程首次跳轉到的上傳頁面。';
+    }
+    if (reason === 'SESSION_BRIDGE_SAVED_DATA_ID_MISSING') {
+        return '自動上傳未啟動：create→upload 承接資料缺少 savedDataId。';
+    }
+    if (reason === 'SESSION_BRIDGE_FLOW_TOKEN_MISSING') {
+        return '自動上傳未啟動：create→upload 缺少可信流程票據。';
+    }
+    if (reason === 'SESSION_BRIDGE_STAGE_INVALID') {
+        return '自動上傳未啟動：create→upload 流程尚未進入可上傳階段。';
+    }
+    if (reason === 'SESSION_BRIDGE_SUBMITTED_AT_MISSING') {
+        return '自動上傳未啟動：create→upload 缺少提交時間記錄。';
+    }
+    if (reason === 'SESSION_BRIDGE_SUBMIT_TIMEOUT') {
+        return '自動上傳未啟動：可信 create→upload 流程已過期。';
+    }
+    if (reason === 'SESSION_BRIDGE_ALREADY_CONSUMED') {
+        return '自動上傳未啟動：這次自動上傳資格已經使用過。';
+    }
+    if (reason === 'SESSION_BRIDGE_NOT_ELIGIBLE') {
+        return '自動上傳未啟動：這個頁面不具備自動上傳資格。';
+    }
+    if (reason === 'CURRENT_PAGE_REFERRER_MISSING') {
+        return '自動上傳未啟動：目前頁面沒有可信的 create 頁來源。';
+    }
+    if (reason === 'CURRENT_PAGE_REFERRER_NOT_CREATE_PAGE') {
+        return '自動上傳未啟動：目前頁面不是從 act=new 首次跳轉而來。';
+    }
+    if (reason === 'CURRENT_PAGE_REFERRER_MISMATCH') {
+        return '自動上傳未啟動：目前頁面來源與這次 create 流程不一致。';
+    }
+    if (reason === 'SESSION_BRIDGE_ULGID_MISMATCH') {
+        return '自動上傳未啟動：create→upload 承接的 ulgid 與目前頁面不一致。';
+    }
+    if (reason === 'NO_PENDING_UPLOAD_CONTEXT') {
+        return '自動上傳未啟動：沒有找到 create→upload 承接資料。';
+    }
+
+    return '自動上傳未啟動：create→upload 承接失敗（' + reason + '）。';
+}
+
+function notifyPendingUploadResolutionFailureOnce(currentUlgid, pendingUploadState) {
+    var normalizedCurrentUlgid = String(currentUlgid || '').trim();
+    var message = getPendingUploadResolutionFailureMessage(pendingUploadState);
+
+    if (!normalizedCurrentUlgid || !message) return;
+
+    var reason = String((pendingUploadState && pendingUploadState.resolutionReason) || 'UNKNOWN').trim() || 'UNKNOWN';
+    var alertKey = UPLOAD_HANDOFF_ALERT_PREFIX_KEY + ':' + normalizedCurrentUlgid + ':' + reason;
+
+    try {
+        if (sessionStorage.getItem(alertKey)) return;
+        sessionStorage.setItem(alertKey, '1');
+    } catch (e) {}
+
+    uploadDebugError('handleManageGalleryPage:pending_upload_resolution_failed_alert', {
+        currentUlgid: normalizedCurrentUlgid,
+        resolutionReason: reason,
+        pendingUploadState: pendingUploadState,
+        message: message
+    });
+
+    alert(message);
+}
+
+function findExternalMultiUploadInput() {
+    uploadDebugLog('findExternalMultiUploadInput:start');
+
+    var buttons = Array.prototype.slice.call(document.querySelectorAll('button, input[type="button"], input[type="submit"]'));
+    for (var i = 0; i < buttons.length; i++) {
+        var btn = buttons[i];
+        var text = String(btn.tagName === 'INPUT' ? btn.value : btn.textContent || '').trim();
+        if (text !== 'Multi Upload') continue;
+
+        var parent = btn.parentElement;
+        uploadDebugLog('findExternalMultiUploadInput:found_button', {
+            tagName: btn.tagName,
+            text: text,
+            hasParent: !!parent
+        });
+
+        if (!parent) continue;
+
+        var inputs = parent.querySelectorAll('input[type="file"][multiple]');
+        for (var j = 0; j < inputs.length; j++) {
+            var input = inputs[j];
+            if (input.style.display === 'none' || input.hidden || input.offsetParent === null) {
+                uploadDebugLog('findExternalMultiUploadInput:found_hidden_input_near_button', {
+                    index: j,
+                    multiple: !!input.multiple,
+                    display: input.style.display || '',
+                    hidden: !!input.hidden
+                });
+                return input;
+            }
+        }
+    }
+
+    var fallbackInputs = document.querySelectorAll('input[type="file"][multiple]');
+    for (var k = 0; k < fallbackInputs.length; k++) {
+        var fallbackInput = fallbackInputs[k];
+        if (fallbackInput.style.display === 'none' || fallbackInput.hidden || fallbackInput.offsetParent === null) {
+            uploadDebugLog('findExternalMultiUploadInput:found_fallback_hidden_input', {
+                index: k,
+                multiple: !!fallbackInput.multiple,
+                display: fallbackInput.style.display || '',
+                hidden: !!fallbackInput.hidden
+            });
+            return fallbackInput;
+        }
+    }
+
+    uploadDebugWarn('findExternalMultiUploadInput:not_found');
+    return null;
+}
+
+function waitForExternalMultiUploadInput(retries, delayMs) {
+    retries = typeof retries === 'number' ? retries : 40;
+    delayMs = typeof delayMs === 'number' ? delayMs : 500;
+
+    uploadDebugLog('waitForExternalMultiUploadInput:start', {
+        retries: retries,
+        delayMs: delayMs
+    });
+
+    return new Promise(function(resolve) {
+        function check(remaining) {
+            uploadDebugLog('waitForExternalMultiUploadInput:check', {
+                remaining: remaining
+            });
+
+            var input = findExternalMultiUploadInput();
+            if (input) {
+                uploadDebugLog('waitForExternalMultiUploadInput:resolved', {
+                    remaining: remaining
+                });
+                resolve(input);
                 return;
             }
 
-            var filePromises = files.map(function(fileEntry) {
-                var sourcePath = String((fileEntry && (fileEntry.path || fileEntry.originalPath || fileEntry.name)) || '');
+            if (remaining <= 0) {
+                uploadDebugError('waitForExternalMultiUploadInput:timeout');
+                resolve(null);
+                return;
+            }
+
+            setTimeout(function() {
+                check(remaining - 1);
+            }, delayMs);
+        }
+
+        check(retries);
+    });
+}
+
+function handoffFilesToExternalMultiUpload(fileObjs) {
+    fileObjs = Array.isArray(fileObjs) ? fileObjs.filter(function(fileObj) {
+        return !!fileObj;
+    }) : [];
+
+    uploadDebugLog('handoffFilesToExternalMultiUpload:start', {
+        count: fileObjs.length,
+        files: fileObjs.map(function(fileObj) {
+            return {
+                name: fileObj.name,
+                size: fileObj.size,
+                type: fileObj.type
+            };
+        })
+    });
+
+    if (!fileObjs.length) {
+        uploadDebugWarn('handoffFilesToExternalMultiUpload:no_files');
+        return Promise.resolve(false);
+    }
+
+    return waitForExternalMultiUploadInput(40, 500).then(function(hiddenInput) {
+        if (!hiddenInput) {
+            uploadDebugError('handoffFilesToExternalMultiUpload:hidden_input_not_found');
+            errorLog('Upload', '找不到外部聯動腳本的 Multi Upload hidden input');
+            return false;
+        }
+
+        var dt = new DataTransfer();
+        fileObjs.forEach(function(fileObj) {
+            dt.items.add(fileObj);
+        });
+
+        uploadDebugLog('handoffFilesToExternalMultiUpload:before_assign', {
+            dataTransferCount: dt.files.length
+        });
+
+        hiddenInput.files = dt.files;
+
+        uploadDebugLog('handoffFilesToExternalMultiUpload:after_assign', {
+            hiddenInputFileCount: hiddenInput.files ? hiddenInput.files.length : null
+        });
+
+        hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
+        uploadDebugLog('handoffFilesToExternalMultiUpload:change_dispatched');
+
+        return true;
+    });
+}
+
+function normalizeExactRelativeUploadPath(sourcePath) {
+    sourcePath = String(sourcePath || '').replace(/\\/g, '/').trim();
+    while (sourcePath.indexOf('./') === 0) {
+        sourcePath = sourcePath.slice(2);
+    }
+    sourcePath = sourcePath.replace(/\/+/g, '/');
+    sourcePath = sourcePath.replace(/^\/+/, '').replace(/\/+$/, '');
+    if (!sourcePath) return '';
+    if (sourcePath === '.' || sourcePath === '..') return '';
+    if (/(^|\/)\.\.(\/|$)/.test(sourcePath)) return '';
+    return sourcePath;
+}
+
+function pickExactGalleryFileSourcePathCandidate(fileEntry) {
+    fileEntry = fileEntry || {};
+
+    var directFile = fileEntry.file && typeof fileEntry.file === 'object' ? fileEntry.file : null;
+    var candidates = [
+        { field: 'exactSourcePath', value: fileEntry.exactSourcePath },
+        { field: 'sourcePath', value: fileEntry.sourcePath },
+        { field: 'relativePath', value: fileEntry.relativePath },
+        { field: 'path', value: fileEntry.path },
+        { field: 'originalPath', value: fileEntry.originalPath },
+        { field: 'webkitRelativePath', value: fileEntry.webkitRelativePath },
+        { field: 'file.webkitRelativePath', value: directFile && directFile.webkitRelativePath ? directFile.webkitRelativePath : '' }
+    ];
+
+    var normalizedCandidates = candidates.map(function(candidate, index) {
+        return {
+            field: candidate.field,
+            path: normalizeExactRelativeUploadPath(candidate.value),
+            order: index
+        };
+    }).filter(function(candidate) {
+        return !!candidate.path;
+    });
+
+    if (!normalizedCandidates.length) return null;
+
+    normalizedCandidates.sort(function(a, b) {
+        var aHasDirectory = a.path.indexOf('/') >= 0 ? 1 : 0;
+        var bHasDirectory = b.path.indexOf('/') >= 0 ? 1 : 0;
+
+        if (aHasDirectory !== bHasDirectory) return bHasDirectory - aHasDirectory;
+        if (a.path.length !== b.path.length) return b.path.length - a.path.length;
+        return a.order - b.order;
+    });
+
+    return {
+        field: normalizedCandidates[0].field,
+        path: normalizedCandidates[0].path
+    };
+}
+
+function mergePreciseSourceFieldsIntoGalleryFileEntry(fileEntry) {
+    fileEntry = fileEntry || {};
+
+    var merged = Object.assign({}, fileEntry);
+    var exactCandidate = pickExactGalleryFileSourcePathCandidate(fileEntry);
+    var exactPath = exactCandidate ? exactCandidate.path : '';
+    var sourceField = exactCandidate ? exactCandidate.field : null;
+
+    if (exactPath) {
+        merged.exactSourcePath = exactPath;
+        merged.sourcePath = exactPath;
+        merged.originalPath = exactPath;
+        merged.relativePath = exactPath;
+        merged.path = exactPath;
+        merged.sourceField = sourceField;
+        merged.hasPreciseSourcePath = true;
+        merged.autoUploadReady = true;
+
+        if (merged.autoUploadError === 'missing_precise_source_path') {
+            delete merged.autoUploadError;
+        }
+    } else {
+        merged.exactSourcePath = '';
+        merged.hasPreciseSourcePath = false;
+
+        if (typeof merged.autoUploadReady !== 'boolean') {
+            merged.autoUploadReady = false;
+        }
+        if (!merged.autoUploadError) {
+            merged.autoUploadError = 'missing_precise_source_path';
+        }
+    }
+
+    merged.name = String(merged.name || merged.originalName || '').trim();
+    merged.originalName = String(merged.originalName || merged.name || '').trim();
+    merged.uploadName = String(merged.uploadName || merged.name || merged.originalName || '').trim();
+
+    if (typeof merged.size === 'number' && !isFinite(merged.size)) {
+        delete merged.size;
+    }
+    if (typeof merged.lastModified === 'number' && !isFinite(merged.lastModified)) {
+        delete merged.lastModified;
+    }
+
+    return merged;
+}
+
+var __fifybujOriginalNormalizeGalleryFileListEntry = typeof normalizeGalleryFileListEntry === 'function' ? normalizeGalleryFileListEntry : null;
+if (__fifybujOriginalNormalizeGalleryFileListEntry && !__fifybujOriginalNormalizeGalleryFileListEntry.__fifybujPreciseSourceWrapped) {
+    var __fifybujWrappedNormalizeGalleryFileListEntry = function(fileEntry) {
+        var normalized = __fifybujOriginalNormalizeGalleryFileListEntry(fileEntry);
+        return mergePreciseSourceFieldsIntoGalleryFileEntry(Object.assign({}, fileEntry || {}, normalized || {}));
+    };
+    __fifybujWrappedNormalizeGalleryFileListEntry.__fifybujPreciseSourceWrapped = true;
+    __fifybujWrappedNormalizeGalleryFileListEntry.__fifybujPreciseSourceOriginal = __fifybujOriginalNormalizeGalleryFileListEntry;
+    normalizeGalleryFileListEntry = __fifybujWrappedNormalizeGalleryFileListEntry;
+}
+
+var __fifybujOriginalNormalizeGalleryFileListEntries = typeof normalizeGalleryFileListEntries === 'function' ? normalizeGalleryFileListEntries : null;
+if (__fifybujOriginalNormalizeGalleryFileListEntries && !__fifybujOriginalNormalizeGalleryFileListEntries.__fifybujPreciseSourceWrapped) {
+    var __fifybujWrappedNormalizeGalleryFileListEntries = function(fileEntries) {
+        var normalizedEntries = __fifybujOriginalNormalizeGalleryFileListEntries(fileEntries);
+        normalizedEntries = Array.isArray(normalizedEntries) ? normalizedEntries : [];
+        return normalizedEntries.map(function(fileEntry) {
+            return mergePreciseSourceFieldsIntoGalleryFileEntry(fileEntry);
+        });
+    };
+    __fifybujWrappedNormalizeGalleryFileListEntries.__fifybujPreciseSourceWrapped = true;
+    __fifybujWrappedNormalizeGalleryFileListEntries.__fifybujPreciseSourceOriginal = __fifybujOriginalNormalizeGalleryFileListEntries;
+    normalizeGalleryFileListEntries = __fifybujWrappedNormalizeGalleryFileListEntries;
+}
+
+var __fifybujOriginalReadGalleryFileListById = typeof readGalleryFileListById === 'function' ? readGalleryFileListById : null;
+if (__fifybujOriginalReadGalleryFileListById && !__fifybujOriginalReadGalleryFileListById.__fifybujPreciseSourceWrapped) {
+    var __fifybujWrappedReadGalleryFileListById = function(savedDataId) {
+        var fileListEntry = __fifybujOriginalReadGalleryFileListById(savedDataId);
+        if (!fileListEntry || typeof fileListEntry !== 'object') return fileListEntry;
+
+        var cloned = Object.assign({}, fileListEntry);
+        if (Array.isArray(cloned.files)) {
+            cloned.files = cloned.files.map(function(fileEntry) {
+                return mergePreciseSourceFieldsIntoGalleryFileEntry(fileEntry);
+            });
+        }
+        return cloned;
+    };
+    __fifybujWrappedReadGalleryFileListById.__fifybujPreciseSourceWrapped = true;
+    __fifybujWrappedReadGalleryFileListById.__fifybujPreciseSourceOriginal = __fifybujOriginalReadGalleryFileListById;
+    readGalleryFileListById = __fifybujWrappedReadGalleryFileListById;
+}
+
+function getPreciseFolderUploadSourceInfo(fileEntry) {
+    var normalized = mergePreciseSourceFieldsIntoGalleryFileEntry(normalizeGalleryFileListEntry(fileEntry));
+    var exactPath = normalizeExactRelativeUploadPath(
+        normalized.exactSourcePath ||
+        normalized.sourcePath ||
+        normalized.originalPath ||
+        normalized.relativePath ||
+        normalized.path
+    );
+
+    if (exactPath) {
+        return {
+            isPrecise: true,
+            sourceField: normalized.sourceField || 'exactSourcePath',
+            sourcePath: exactPath,
+            snapshot: {
+                name: normalized.name || '',
+                originalName: normalized.originalName || '',
+                uploadName: normalized.uploadName || getGalleryFileUploadName(fileEntry) || '',
+                exactSourcePath: normalized.exactSourcePath || '',
+                sourcePath: normalized.sourcePath || '',
+                originalPath: normalized.originalPath || '',
+                relativePath: normalized.relativePath || '',
+                path: normalized.path || '',
+                hasPreciseSourcePath: !!normalized.hasPreciseSourcePath,
+                autoUploadReady: normalized.autoUploadReady !== false,
+                autoUploadError: normalized.autoUploadError || ''
+            }
+        };
+    }
+
+    return {
+        isPrecise: false,
+        sourceField: null,
+        sourcePath: '',
+        snapshot: {
+            name: normalized.name || '',
+            originalName: normalized.originalName || '',
+            uploadName: normalized.uploadName || getGalleryFileUploadName(fileEntry) || '',
+            exactSourcePath: normalized.exactSourcePath || '',
+            sourcePath: normalized.sourcePath || '',
+            originalPath: normalized.originalPath || '',
+            relativePath: normalized.relativePath || '',
+            path: normalized.path || '',
+            hasPreciseSourcePath: !!normalized.hasPreciseSourcePath,
+            autoUploadReady: normalized.autoUploadReady !== false,
+            autoUploadError: normalized.autoUploadError || 'missing_precise_source_path'
+        }
+    };
+}
+
+function getFolderUploadSourcePath(fileEntry) {
+    return getPreciseFolderUploadSourceInfo(fileEntry).sourcePath;
+}
+
+function getArchiveUploadSourcePath(fileEntry) {
+    var normalized = normalizeArchiveSourceFileEntry(fileEntry);
+    return String(normalized.relativePath || normalized.path || normalized.originalName || normalized.name || '').trim();
+}
+
+function resolveAuthorizedUploadRootHandle(authorizedRootId, cache) {
+    cache = cache || {};
+    var cacheKey = String(authorizedRootId || '__legacy__');
+
+    if (cache.hasOwnProperty(cacheKey)) {
+        uploadDebugLog('resolveAuthorizedUploadRootHandle:cache_hit', {
+            authorizedRootId: authorizedRootId,
+            cacheKey: cacheKey
+        });
+        return Promise.resolve(cache[cacheKey]);
+    }
+
+    uploadDebugLog('resolveAuthorizedUploadRootHandle:cache_miss', {
+        authorizedRootId: authorizedRootId,
+        cacheKey: cacheKey
+    });
+
+    return getAuthorizedRootHandleByIdOrLegacy(authorizedRootId).then(function(rootHandle) {
+        uploadDebugLog('resolveAuthorizedUploadRootHandle:handle_loaded', {
+            authorizedRootId: authorizedRootId,
+            hasHandle: !!rootHandle
+        });
+
+        if (!rootHandle) throw new Error('無已授權文件夾 handle');
+
+        return requestReadPermissionIfNeeded(rootHandle).then(function(canRead) {
+            uploadDebugLog('resolveAuthorizedUploadRootHandle:permission_checked', {
+                authorizedRootId: authorizedRootId,
+                canRead: canRead
+            });
+
+            if (!canRead) throw new Error('授權文件夾無讀取權限');
+            cache[cacheKey] = rootHandle;
+            return rootHandle;
+        });
+    });
+}
+
+function buildFolderAwareUploadPlanFromFlatFiles(files) {
+    var source = normalizeGalleryFileListEntries(files);
+    var root = {
+        files: [],
+        folders: {},
+        folderOrder: []
+    };
+
+    function ensureFolderNode(parentNode, folderName) {
+        if (!parentNode.folders[folderName]) {
+            parentNode.folders[folderName] = {
+                files: [],
+                folders: {},
+                folderOrder: []
+            };
+            parentNode.folderOrder.push(folderName);
+        }
+        return parentNode.folders[folderName];
+    }
+
+    source.forEach(function(fileEntry, index) {
+        var normalized = mergePreciseSourceFieldsIntoGalleryFileEntry(fileEntry);
+        var sourcePath = normalizeExactRelativeUploadPath(
+            normalized.exactSourcePath ||
+            normalized.sourcePath ||
+            normalized.relativePath ||
+            normalized.originalPath ||
+            normalized.path ||
+            normalized.originalName ||
+            normalized.name ||
+            ''
+        );
+        var pathParts = sourcePath ? sourcePath.split('/').filter(function(part) {
+            return !!part;
+        }) : [];
+        var folderParts = pathParts.slice(0, -1);
+        var node = root;
+
+        folderParts.forEach(function(folderName) {
+            node = ensureFolderNode(node, folderName);
+        });
+
+        node.files.push({
+            fileEntry: normalized,
+            sourcePath: sourcePath,
+            originalIndex: index
+        });
+    });
+
+    function flattenNode(node, out) {
+        node.files.forEach(function(item) {
+            out.push(item.fileEntry);
+        });
+
+        node.folderOrder.forEach(function(folderName) {
+            flattenNode(node.folders[folderName], out);
+        });
+
+        return out;
+    }
+
+    return flattenNode(root, []);
+}
+
+function resolveFolderUploadFilesInSavedOrder(fileListEntry) {
+    var originalFiles = normalizeGalleryFileListEntries(fileListEntry && fileListEntry.files);
+    var files = buildFolderAwareUploadPlanFromFlatFiles(originalFiles);
+    var rootHandleCache = {};
+
+    uploadDebugLog('resolveFolderUploadFilesInSavedOrder:start', {
+        authorizedRootId: fileListEntry && fileListEntry.authorizedRootId,
+        count: files.length,
+        originalOrder: originalFiles.map(function(fileEntry, index) {
+            var sourceInfo = getPreciseFolderUploadSourceInfo(fileEntry);
+            return {
+                index: index + 1,
+                sourcePath: sourceInfo.sourcePath || null,
+                uploadName: getGalleryFileUploadName(fileEntry)
+            };
+        }),
+        uploadPlan: files.map(function(fileEntry, index) {
+            var sourceInfo = getPreciseFolderUploadSourceInfo(fileEntry);
+            return {
+                index: index + 1,
+                isPrecise: sourceInfo.isPrecise,
+                sourceField: sourceInfo.sourceField,
+                sourcePath: sourceInfo.sourcePath || null,
+                uploadName: getGalleryFileUploadName(fileEntry),
+                snapshot: sourceInfo.snapshot
+            };
+        })
+    });
+
+    if (!files.length) return Promise.resolve([]);
+
+    return resolveAuthorizedUploadRootHandle(fileListEntry.authorizedRootId, rootHandleCache).then(function(rootHandle) {
+        return files.reduce(function(chain, fileEntry, index) {
+            return chain.then(function(out) {
+                var sourceInfo = getPreciseFolderUploadSourceInfo(fileEntry);
+                var sourcePath = sourceInfo.sourcePath;
                 var uploadName = getGalleryFileUploadName(fileEntry);
 
-                if (!sourcePath) {
-                    warnLog('Upload', '缺少原始檔案路徑，無法上傳', { fileEntry: fileEntry });
-                    return Promise.resolve(null);
+                uploadDebugLog('resolveFolderUploadFilesInSavedOrder:item_begin', {
+                    index: index + 1,
+                    isPrecise: sourceInfo.isPrecise,
+                    sourceField: sourceInfo.sourceField,
+                    sourcePath: sourcePath || null,
+                    uploadName: uploadName,
+                    snapshot: sourceInfo.snapshot
+                });
+
+                if (!sourceInfo.isPrecise || !sourcePath) {
+                    uploadDebugError('resolveFolderUploadFilesInSavedOrder:item_missing_precise_source_path', {
+                        index: index + 1,
+                        snapshot: sourceInfo.snapshot
+                    });
+                    throw new Error('第 ' + (index + 1) + ' 筆缺少精確來源路徑，無法保證 100% 正確上傳，請重新 Analyze / Save');
                 }
 
                 return resolveFileObjectFromDirectoryHandlePath(rootHandle, sourcePath).then(function(fileObj) {
-                    return createRenamedUploadFile(fileObj, uploadName);
+                    if (!fileObj) {
+                        uploadDebugError('resolveFolderUploadFilesInSavedOrder:item_not_found', {
+                            index: index + 1,
+                            sourceField: sourceInfo.sourceField,
+                            sourcePath: sourcePath,
+                            snapshot: sourceInfo.snapshot
+                        });
+                        throw new Error('找不到文件夾來源檔案: ' + sourcePath);
+                    }
+
+                    var renamedFile = createRenamedUploadFile(fileObj, uploadName);
+                    uploadDebugLog('resolveFolderUploadFilesInSavedOrder:item_resolved', {
+                        index: index + 1,
+                        sourceField: sourceInfo.sourceField,
+                        sourcePath: sourcePath,
+                        originalName: fileObj.name,
+                        uploadName: renamedFile ? renamedFile.name : uploadName,
+                        size: fileObj.size
+                    });
+
+                    out.push(renamedFile);
+                    return out;
                 }).catch(function(err) {
-                    warnLog('Upload', '無法解析檔案', { path: sourcePath, message: err.message });
-                    return null;
+                    uploadDebugError('resolveFolderUploadFilesInSavedOrder:item_error', {
+                        index: index + 1,
+                        sourceField: sourceInfo.sourceField,
+                        sourcePath: sourcePath,
+                        snapshot: sourceInfo.snapshot,
+                        message: err && err.message
+                    });
+                    throw new Error('找不到文件夾來源檔案: ' + sourcePath + ' ' + ((err && err.message) || ''));
                 });
             });
+        }, Promise.resolve([]));
+    }).then(function(fileObjs) {
+        uploadDebugLog('resolveFolderUploadFilesInSavedOrder:done', {
+            count: fileObjs.length,
+            files: fileObjs.map(function(fileObj, index) {
+                return {
+                    index: index + 1,
+                    name: fileObj.name,
+                    size: fileObj.size
+                };
+            })
+        });
+        return fileObjs;
+    });
+}
 
-            return Promise.all(filePromises).then(function(fileObjs) {
-                fileObjs = fileObjs.filter(function(f) { return f !== null; });
-                flowLog('Upload', '成功解析 File 物件', fileObjs.length);
-                if (fileObjs.length === 0) {
-                    warnLog('Upload', '無有效 File 物件，跳過上傳');
-                    return;
-                }
+function resolveArchiveUploadFiles(fileListEntry) {
+    var archiveSourceFiles = normalizeArchiveSourceFileEntries(fileListEntry && fileListEntry.archiveSourceFiles);
+    var rootHandleCache = {};
 
-                function waitForMultiUploadBtn(retries) {
-                    if (retries <= 0) {
-                        errorLog('Upload', 'Multi Upload 按鈕等待超時');
-                        return;
+    uploadDebugLog('resolveArchiveUploadFiles:start', {
+        count: archiveSourceFiles.length,
+        files: archiveSourceFiles.map(function(fileEntry, index) {
+            return {
+                index: index + 1,
+                sourcePath: getArchiveUploadSourcePath(fileEntry),
+                uploadName: String(fileEntry.uploadName || fileEntry.originalName || fileEntry.name || '').trim(),
+                authorizedRootId: fileEntry.authorizedRootId != null ? fileEntry.authorizedRootId : fileListEntry.authorizedRootId
+            };
+        })
+    });
+
+    if (!archiveSourceFiles.length) {
+        uploadDebugError('resolveArchiveUploadFiles:missing_archiveSourceFiles');
+        return Promise.reject(new Error('缺少 archiveSourceFiles，無法重新取得原始壓縮包'));
+    }
+
+    return archiveSourceFiles.reduce(function(chain, fileEntry, index) {
+        return chain.then(function(out) {
+            var sourcePath = getArchiveUploadSourcePath(fileEntry);
+            var uploadName = String(fileEntry.uploadName || fileEntry.originalName || fileEntry.name || '').trim();
+            var authorizedRootId = fileEntry.authorizedRootId != null ? fileEntry.authorizedRootId : fileListEntry.authorizedRootId;
+
+            uploadDebugLog('resolveArchiveUploadFiles:item_begin', {
+                index: index + 1,
+                sourcePath: sourcePath,
+                uploadName: uploadName,
+                authorizedRootId: authorizedRootId
+            });
+
+            if (!sourcePath) {
+                uploadDebugError('resolveArchiveUploadFiles:item_missing_source_path', {
+                    index: index + 1,
+                    fileEntry: fileEntry
+                });
+                throw new Error('第 ' + (index + 1) + ' 個壓縮包缺少來源路徑');
+            }
+
+            return resolveAuthorizedUploadRootHandle(authorizedRootId, rootHandleCache).then(function(rootHandle) {
+                return resolveFileObjectFromDirectoryHandlePath(rootHandle, sourcePath).then(function(fileObj) {
+                    if (!fileObj) {
+                        uploadDebugError('resolveArchiveUploadFiles:item_not_found', {
+                            index: index + 1,
+                            sourcePath: sourcePath
+                        });
+                        throw new Error('找不到壓縮包來源檔案: ' + sourcePath);
                     }
-                    var btn = Array.from(document.querySelectorAll('button')).find(function(b) {
-                        return b.textContent.trim() === 'Multi Upload';
+
+                    var renamedFile = createRenamedUploadFile(fileObj, uploadName);
+                    uploadDebugLog('resolveArchiveUploadFiles:item_resolved', {
+                        index: index + 1,
+                        sourcePath: sourcePath,
+                        originalName: fileObj.name,
+                        uploadName: renamedFile ? renamedFile.name : uploadName,
+                        size: fileObj.size
                     });
-                    if (!btn) {
-                        _debug('[Upload] 等待 Multi Upload 按鈕...');
-                        setTimeout(function() { waitForMultiUploadBtn(retries - 1); }, 500);
-                        return;
-                    }
-                    var parent = btn.parentElement;
-                    var hiddenInput = parent ? Array.from(parent.querySelectorAll('input[type="file"]')).find(function(i) {
-                        return i.style.display === 'none' && i.multiple;
-                    }) : null;
-                    if (!hiddenInput) {
-                        _debug('[Upload] 等待 hiddenInput...');
-                        setTimeout(function() { waitForMultiUploadBtn(retries - 1); }, 500);
-                        return;
-                    }
-                    flowLog('Upload', '找到 Multi Upload hiddenInput，開始注入', fileObjs.length);
-                    var dt = new DataTransfer();
-                    fileObjs.forEach(function(f) { dt.items.add(f); });
-                    hiddenInput.files = dt.files;
-                    hiddenInput.dispatchEvent(new Event('change', { bubbles: true }));
-                    flowLog('Upload', 'change 事件已觸發，上傳腳本接管');
-                }
 
-                waitForMultiUploadBtn(20);
+                    out.push(renamedFile);
+                    return out;
+                }).catch(function(err) {
+                    uploadDebugError('resolveArchiveUploadFiles:item_error', {
+                        index: index + 1,
+                        sourcePath: sourcePath,
+                        message: err && err.message
+                    });
+                    throw new Error('找不到壓縮包來源檔案: ' + sourcePath + ' ' + ((err && err.message) || ''));
+                });
             });
         });
+    }, Promise.resolve([])).then(function(fileObjs) {
+        uploadDebugLog('resolveArchiveUploadFiles:done', {
+            count: fileObjs.length,
+            files: fileObjs.map(function(fileObj, index) {
+                return {
+                    index: index + 1,
+                    name: fileObj.name,
+                    size: fileObj.size
+                };
+            })
+        });
+        return fileObjs;
+    });
+}
+
+function resolvePendingUploadFilesBySavedDataId(savedDataId) {
+    var fileListEntry = readGalleryFileListById(savedDataId);
+    var hasArchiveSources = !!(fileListEntry && Array.isArray(fileListEntry.archiveSourceFiles) && fileListEntry.archiveSourceFiles.length > 0);
+    var hasFolderSources = !!(fileListEntry && fileListEntry.authorizedRootId);
+
+    uploadDebugLog('resolvePendingUploadFilesBySavedDataId:start', {
+        savedDataId: savedDataId,
+        hasFileListEntry: !!fileListEntry
+    });
+
+    if (!fileListEntry) {
+        uploadDebugError('resolvePendingUploadFilesBySavedDataId:file_list_missing', {
+            savedDataId: savedDataId
+        });
+        return Promise.reject(new Error('無文件列表資料'));
+    }
+
+    var preciseFolderSourceState = normalizeGalleryFileListEntries(fileListEntry && fileListEntry.files).map(function(fileEntry, index) {
+        var sourceInfo = getPreciseFolderUploadSourceInfo(fileEntry);
+        return {
+            index: index + 1,
+            isPrecise: sourceInfo.isPrecise,
+            sourceField: sourceInfo.sourceField,
+            sourcePath: sourceInfo.sourcePath || null,
+            hasPreciseSourcePath: !!(sourceInfo.snapshot && sourceInfo.snapshot.hasPreciseSourcePath),
+            autoUploadReady: !!(sourceInfo.snapshot && sourceInfo.snapshot.autoUploadReady),
+            autoUploadError: sourceInfo.snapshot ? (sourceInfo.snapshot.autoUploadError || null) : null,
+            snapshot: sourceInfo.snapshot
+        };
+    });
+
+    uploadDebugLog('resolvePendingUploadFilesBySavedDataId:file_list_entry', {
+        savedDataId: savedDataId,
+        sourceType: fileListEntry.sourceType || null,
+        filesCount: Array.isArray(fileListEntry.files) ? fileListEntry.files.length : 0,
+        archiveSourceFilesCount: Array.isArray(fileListEntry.archiveSourceFiles) ? fileListEntry.archiveSourceFiles.length : 0,
+        authorizedRootId: fileListEntry.authorizedRootId || null,
+        folderName: fileListEntry.folderName || null,
+        sourceLabel: fileListEntry.sourceLabel || null,
+        hasArchiveSources: hasArchiveSources,
+        hasFolderSources: hasFolderSources,
+        preciseFolderSourceState: preciseFolderSourceState
+    });
+
+    if (fileListEntry.sourceType === 'folder' || (!fileListEntry.sourceType && hasFolderSources)) {
+        uploadDebugLog('resolvePendingUploadFilesBySavedDataId:branch_folder', {
+            savedDataId: savedDataId
+        });
+        return resolveFolderUploadFilesInSavedOrder(fileListEntry).then(function(fileObjs) {
+            return {
+                sourceType: 'folder',
+                fileListEntry: fileListEntry,
+                files: fileObjs
+            };
+        });
+    }
+
+    if (fileListEntry.sourceType === 'archive' || (!fileListEntry.sourceType && hasArchiveSources)) {
+        uploadDebugLog('resolvePendingUploadFilesBySavedDataId:branch_archive', {
+            savedDataId: savedDataId
+        });
+        return resolveArchiveUploadFiles(fileListEntry).then(function(fileObjs) {
+            return {
+                sourceType: 'archive',
+                fileListEntry: fileListEntry,
+                files: fileObjs
+            };
+        });
+    }
+
+    uploadDebugError('resolvePendingUploadFilesBySavedDataId:unsupported_source_type', {
+        savedDataId: savedDataId,
+        sourceType: fileListEntry.sourceType || 'unknown'
+    });
+    return Promise.reject(new Error('不支援的上傳來源: ' + (fileListEntry.sourceType || 'unknown')));
+}
+
+function startFolderUpload(savedDataId) {
+    flowLog('Upload', 'startFolderUpload 開始', savedDataId);
+    uploadDebugLog('startFolderUpload:start', {
+        savedDataId: savedDataId
+    });
+
+    resolvePendingUploadFilesBySavedDataId(savedDataId).then(function(result) {
+        var fileObjs = result && Array.isArray(result.files) ? result.files.filter(function(fileObj) {
+            return !!fileObj;
+        }) : [];
+
+        uploadDebugLog('startFolderUpload:resolved_files', {
+            sourceType: result ? result.sourceType : null,
+            count: fileObjs.length,
+            files: fileObjs.map(function(fileObj, index) {
+                return {
+                    index: index + 1,
+                    name: fileObj.name,
+                    size: fileObj.size
+                };
+            })
+        });
+
+        if (!fileObjs.length) {
+            uploadDebugWarn('startFolderUpload:no_valid_files', {
+                savedDataId: savedDataId,
+                sourceType: result ? result.sourceType : null
+            });
+            warnLog('Upload', '無有效 File 物件，跳過上傳');
+            return false;
+        }
+
+        flowLog('Upload', '待交接外部聯動腳本', {
+            sourceType: result.sourceType,
+            count: fileObjs.length
+        });
+
+        return handoffFilesToExternalMultiUpload(fileObjs).then(function(success) {
+            uploadDebugLog('startFolderUpload:handoff_result', {
+                savedDataId: savedDataId,
+                sourceType: result.sourceType,
+                success: success
+            });
+
+            if (!success) {
+                uploadDebugError('startFolderUpload:handoff_failed', {
+                    savedDataId: savedDataId,
+                    sourceType: result.sourceType
+                });
+                alert('自動上傳失敗（交接外部 Multi Upload 階段）：找不到外部聯動腳本的 Multi Upload 控件');
+                return false;
+            }
+
+            var pendingUpload = GM_getValue('pending_upload', null);
+            uploadDebugLog('startFolderUpload:pending_upload_before_clear', pendingUpload);
+
+            if (pendingUpload && String(pendingUpload.savedDataId || '') === String(savedDataId || '')) {
+                GM_setValue('pending_upload', null);
+                uploadDebugLog('startFolderUpload:pending_upload_cleared', {
+                    savedDataId: savedDataId
+                });
+            }
+
+            var sessionBridge = readCreateToUploadSessionBridge();
+            if (sessionBridge && String(sessionBridge.savedDataId || '') === String(savedDataId || '')) {
+                clearCreateToUploadSessionBridge('upload_handoff_success', {
+                    savedDataId: savedDataId,
+                    sourceType: result.sourceType,
+                    count: fileObjs.length
+                });
+            }
+
+            opLog('Upload 交接外部聯動腳本', {
+                savedDataId: savedDataId,
+                sourceType: result.sourceType,
+                count: fileObjs.length
+            });
+
+            uploadDebugLog('startFolderUpload:done', {
+                savedDataId: savedDataId,
+                sourceType: result.sourceType,
+                count: fileObjs.length
+            });
+            return true;
+        });
     }).catch(function(err) {
+        uploadDebugError('startFolderUpload:error', {
+            savedDataId: savedDataId,
+            message: err && err.message,
+            stack: err && err.stack
+        });
         errorLog('Upload', 'startFolderUpload 失敗', err);
+        alert('自動上傳失敗（準備來源檔案階段）：' + ((err && err.message) || err));
+        return false;
     });
 }
 
@@ -2326,22 +3831,256 @@ function createCategorySelect(selectedCat) {
     return select;
 }
 
-function getLocalFolders() {
-    try {
-        var v = GM_getValue('local_folders', ['Waiting Create']);
-        return Array.isArray(v) ? v : ['Waiting Create'];
-    } catch (e) {
-        return ['Waiting Create'];
-    }
+function normalizeLocalFolders(folders) {
+    var source = Array.isArray(folders) ? folders : [];
+    var out = [];
+    var seen = {};
+
+    source.forEach(function(folderName) {
+        var name = String(folderName || '').trim();
+        if (!name || seen[name]) return;
+        seen[name] = true;
+        out.push(name);
+    });
+
+    if (!out.length) out.push('Waiting Create');
+    return out;
 }
 
-function saveLocalFolders(folders) {
+function getDefaultLocalFolderName() {
+    var settings = Object.assign({}, getDefaultSettings(), getCurrentSettingsSafe() || {});
+    var defaultFolder = String(settings.defaultLocalFolder || '').trim() || 'Waiting Create';
+    var folders = [];
+
+    try {
+        folders = GM_getValue('local_folders', [defaultFolder]);
+    } catch (e) {
+        folders = [defaultFolder];
+    }
+
+    folders = normalizeLocalFolders(folders);
+    if (folders.indexOf(defaultFolder) === -1) defaultFolder = folders[0] || 'Waiting Create';
+    return defaultFolder || 'Waiting Create';
+}
+
+function setDefaultLocalFolderName(folderName, foldersOverride) {
+    var folders = normalizeLocalFolders(foldersOverride != null ? foldersOverride : getLocalFolders());
+    var nextDefaultFolder = String(folderName || '').trim();
+
+    if (!nextDefaultFolder || folders.indexOf(nextDefaultFolder) === -1) {
+        nextDefaultFolder = folders[0] || 'Waiting Create';
+    }
+
+    if (folders.indexOf(nextDefaultFolder) === -1) {
+        folders.unshift(nextDefaultFolder);
+    }
+
+    saveSettings(Object.assign({}, getCurrentSettingsSafe(), {
+        defaultLocalFolder: nextDefaultFolder
+    }));
+
     try {
         GM_setValue('local_folders', folders);
-        opLog('保存本地資料夾列表', folders);
+    } catch (e) {}
+
+    return nextDefaultFolder;
+}
+
+function getLocalFolders() {
+    var settings = Object.assign({}, getDefaultSettings(), getCurrentSettingsSafe() || {});
+    var defaultFolder = String(settings.defaultLocalFolder || '').trim() || 'Waiting Create';
+    var folders = [];
+
+    try {
+        folders = GM_getValue('local_folders', [defaultFolder]);
+    } catch (e) {
+        folders = [defaultFolder];
+    }
+
+    folders = normalizeLocalFolders(folders);
+
+    if (folders.indexOf(defaultFolder) === -1) {
+        folders.unshift(defaultFolder);
+    }
+
+    if (!folders.length) {
+        folders = [defaultFolder];
+    }
+
+    return folders;
+}
+
+function saveLocalFolders(folders, defaultFolderOverride) {
+    var normalizedFolders = normalizeLocalFolders(folders);
+    var defaultFolder = String(defaultFolderOverride || '').trim() || getDefaultLocalFolderName();
+
+    if (normalizedFolders.indexOf(defaultFolder) === -1) {
+        normalizedFolders.unshift(defaultFolder);
+    }
+
+    try {
+        GM_setValue('local_folders', normalizedFolders);
+        opLog('保存本地資料夾列表', {
+            folders: normalizedFolders,
+            defaultFolder: defaultFolder
+        });
+        if (typeof refreshOpenAutoCreateLocalFolderGroupsIfOpen === 'function') {
+            refreshOpenAutoCreateLocalFolderGroupsIfOpen();
+        }
     } catch (e) {
         errorLog('LocalFolder', '保存失敗', e);
     }
+}
+
+function getSavedLocalFolderGalleryUsageMap() {
+    var usage = {};
+
+    getSavedGalleriesSafe().forEach(function(galleryData) {
+        var folderValue = String((galleryData && galleryData.folder) || '').trim();
+        if (folderValue.indexOf('local:') !== 0) return;
+
+        var folderName = folderValue.slice('local:'.length).trim();
+        if (!folderName) return;
+
+        usage[folderName] = (usage[folderName] || 0) + 1;
+    });
+
+    return usage;
+}
+
+function getAutoCreateGalleryGroupsTbody() {
+    var customSection = document.querySelector('.s[data-custom="true"]');
+    if (!customSection) return null;
+
+    if (customSection.__galleryGroupsTbody && customSection.__galleryGroupsTbody.tagName === 'TBODY') {
+        return customSection.__galleryGroupsTbody;
+    }
+
+    var table = customSection.querySelector('table.mt');
+    var tbody = table ? table.querySelector('tbody') : null;
+
+    if (tbody) customSection.__galleryGroupsTbody = tbody;
+    return tbody || null;
+}
+
+function getRealtimeLocalFolderGalleryUsageMap() {
+    var customSection = document.querySelector('.s[data-custom="true"]');
+    if (!customSection) return getSavedLocalFolderGalleryUsageMap();
+
+    var usage = {};
+    var groupRows = customSection.querySelectorAll('tr.gtr[data-local-folder-name]');
+
+    if (!groupRows || !groupRows.length) return getSavedLocalFolderGalleryUsageMap();
+
+    Array.prototype.forEach.call(groupRows, function(row) {
+        var folderName = String(row.dataset.localFolderName || '').trim();
+        if (!folderName) return;
+
+        var countEl = row.__folderCount || row.querySelector('strong');
+        var count = parseInt((countEl && countEl.textContent) || '0', 10);
+        if (!isFinite(count) || count < 0) count = 0;
+
+        usage[folderName] = count;
+    });
+
+    return usage;
+}
+
+function getStoredLocalFolderExpandStates() {
+    try {
+        var states = GM_getValue('local_folder_expand_states', {});
+        return (states && typeof states === 'object' && !Array.isArray(states)) ? states : {};
+    } catch (e) {
+        return {};
+    }
+}
+
+function saveStoredLocalFolderExpandStates(states) {
+    GM_setValue('local_folder_expand_states', (states && typeof states === 'object' && !Array.isArray(states)) ? states : {});
+}
+
+function getStoredLocalFolderExpandState(folderName, fallbackExpanded) {
+    var states = getStoredLocalFolderExpandStates();
+    var key = String(folderName || '').trim();
+
+    if (!key || !Object.prototype.hasOwnProperty.call(states, key)) return fallbackExpanded !== false;
+    return states[key] !== false;
+}
+
+function setStoredLocalFolderExpandState(folderName, expanded) {
+    var key = String(folderName || '').trim();
+    if (!key) return;
+
+    var states = getStoredLocalFolderExpandStates();
+    states[key] = expanded !== false;
+    saveStoredLocalFolderExpandStates(states);
+}
+
+function refreshOpenLocalFolderPanelIfOpen() {
+    var panel = document.querySelector('.local-folder-container');
+    if (panel && typeof panel.refreshPanel === 'function') panel.refreshPanel();
+}
+
+function canDeleteLocalFolderName(folderName, folders, defaultFolder, usageMap) {
+    var normalizedFolderName = String(folderName || '').trim();
+    var normalizedFolders = normalizeLocalFolders(folders || getLocalFolders());
+    var normalizedDefaultFolder = String(defaultFolder || getDefaultLocalFolderName()).trim();
+    var normalizedUsageMap = usageMap && typeof usageMap === 'object' ? usageMap : getSavedLocalFolderGalleryUsageMap();
+
+    if (!normalizedFolderName) {
+        return { ok: false, reason: 'INVALID_FOLDER' };
+    }
+
+    if (normalizedFolders.indexOf(normalizedFolderName) === -1) {
+        return { ok: false, reason: 'FOLDER_NOT_FOUND' };
+    }
+
+    if (normalizedFolderName === normalizedDefaultFolder) {
+        return { ok: false, reason: 'DEFAULT_FOLDER' };
+    }
+
+    if (normalizedFolders.length < 2) {
+        return { ok: false, reason: 'MIN_FOLDER_COUNT' };
+    }
+
+    if ((normalizedUsageMap[normalizedFolderName] || 0) > 0) {
+        return { ok: false, reason: 'FOLDER_NOT_EMPTY' };
+    }
+
+    return { ok: true, reason: '' };
+}
+
+function renameSavedGalleryLocalFolders(renameMap) {
+    if (!renameMap || typeof renameMap !== 'object') return 0;
+
+    var galleries = getSavedGalleriesSafe();
+    var changedCount = 0;
+
+    if (!Array.isArray(galleries) || !galleries.length) return 0;
+
+    galleries = galleries.map(function(galleryData) {
+        if (!galleryData) return galleryData;
+
+        var folderValue = String(galleryData.folder || '').trim();
+        if (folderValue.indexOf('local:') !== 0) return galleryData;
+
+        var oldFolderName = folderValue.slice('local:'.length).trim();
+        if (!oldFolderName || !Object.prototype.hasOwnProperty.call(renameMap, oldFolderName)) return galleryData;
+
+        var newFolderName = String(renameMap[oldFolderName] || '').trim();
+        if (!newFolderName || newFolderName === oldFolderName) return galleryData;
+
+        changedCount++;
+        return Object.assign({}, galleryData, {
+            folder: 'local:' + newFolderName
+        });
+    });
+
+    if (changedCount > 0) {
+        saveSavedGalleriesSafe(galleries);
+    }
+
+    return changedCount;
 }
 
 function createFolderSelect() {
@@ -2372,6 +4111,68 @@ function createFolderSelect() {
         option.textContent = folder;
         select.appendChild(option);
     });
+    return select;
+}
+
+function populateUploadFolderSelectOptions(selectEl, selectedValue) {
+    if (!selectEl) return;
+
+    var nextSelectedValue = String(selectedValue || '').trim();
+    while (selectEl.options.length > 0) selectEl.remove(0);
+
+    var defaultOption = document.createElement('option');
+    defaultOption.value = 'Unsorted';
+    defaultOption.textContent = 'Unsorted';
+    defaultOption.selected = !nextSelectedValue || nextSelectedValue === 'Unsorted';
+    selectEl.appendChild(defaultOption);
+
+    var folders = getStoredFolders();
+    folders.forEach(function(folder) {
+        var option = document.createElement('option');
+        option.value = folder;
+        option.textContent = folder;
+        if (folder === nextSelectedValue) option.selected = true;
+        selectEl.appendChild(option);
+    });
+
+    if (!Array.prototype.some.call(selectEl.options, function(opt) { return opt.value === nextSelectedValue; })) {
+        selectEl.value = 'Unsorted';
+    }
+}
+
+function createUploadFolderSelect(selectedValue) {
+    var select = document.createElement('select');
+    applySelectStyle(select, '155px');
+    populateUploadFolderSelectOptions(select, selectedValue || 'Unsorted');
+    return select;
+}
+
+function populateLocalFolderSelectOptions(selectEl, selectedValue) {
+    if (!selectEl) return;
+
+    var folders = getLocalFolders();
+    var nextSelectedValue = String(selectedValue || '').trim() || (folders[0] || getDefaultLocalFolderName());
+
+    while (selectEl.options.length > 0) selectEl.remove(0);
+
+    folders.forEach(function(folder) {
+        var option = document.createElement('option');
+        option.value = folder;
+        option.textContent = folder;
+        if (folder === nextSelectedValue) option.selected = true;
+        selectEl.appendChild(option);
+    });
+
+    if (!Array.prototype.some.call(selectEl.options, function(opt) { return opt.value === nextSelectedValue; })) {
+        selectEl.value = folders[0] || getDefaultLocalFolderName();
+    }
+}
+
+function createLocalFolderSelect(selectedValue) {
+    var select = document.createElement('select');
+    applySelectStyle(select, '145px');
+    select.style.fontSize = '10pt';
+    populateLocalFolderSelectOptions(select, selectedValue);
     return select;
 }
 
@@ -2424,6 +4225,7 @@ function getGalleryGroupFields(group) {
         categorySelect: selects[0] || null,
         languageSelect: selects[1] || null,
         folderSelect: selects[2] || null,
+        localFolderSelect: tr2.querySelector('select.local-folder-select'),
         mtlCheckbox: checkboxes[0] || null,
         officialCheckbox: checkboxes[1] || null,
         aiGeneratedCheckbox: checkboxes[2] || null,
@@ -2510,8 +4312,84 @@ function getGalleryGroupSavedDataId(fields) {
     return id || null;
 }
 
+function isLocalFolderOptionValue(value) {
+    return String(value || '').trim().indexOf('local:') === 0;
+}
+
+function extractLocalFolderNameFromValue(value) {
+    var text = String(value || '').trim();
+    if (!isLocalFolderOptionValue(text)) return '';
+    return text.slice('local:'.length).trim();
+}
+
+function getSavedGalleryLocalFolderName(galleryData) {
+    var explicitLocalFolder = String((galleryData && galleryData.localFolder) || '').trim();
+    if (explicitLocalFolder) return explicitLocalFolder;
+
+    var folderValue = String((galleryData && galleryData.folder) || '').trim();
+    if (isLocalFolderOptionValue(folderValue)) {
+        return extractLocalFolderNameFromValue(folderValue) || getDefaultLocalFolderName();
+    }
+
+    return getDefaultLocalFolderName();
+}
+
+function syncGalleryFolderStateForFields(fields) {
+    if (!fields || !fields.tr2) {
+        var fallbackLocalFolder = getDefaultLocalFolderName();
+        return {
+            localFolder: fallbackLocalFolder,
+            uploadFolder: 'Unsorted',
+            selectedValue: 'Unsorted'
+        };
+    }
+
+    var tr2 = fields.tr2;
+    var selectedValue = String((fields.folderSelect && fields.folderSelect.value) || '').trim();
+    var selectedLocalFolderValue = String((fields.localFolderSelect && fields.localFolderSelect.value) || '').trim();
+    var localFolder = selectedLocalFolderValue || String(tr2.dataset.localFolder || '').trim();
+    var uploadFolder = String(tr2.dataset.uploadFolder || '').trim();
+
+    if (isLocalFolderOptionValue(selectedValue)) {
+        localFolder = extractLocalFolderNameFromValue(selectedValue) || localFolder || getDefaultLocalFolderName();
+        if (!uploadFolder || isLocalFolderOptionValue(uploadFolder)) uploadFolder = 'Unsorted';
+    } else {
+        if (!localFolder) localFolder = getDefaultLocalFolderName();
+        uploadFolder = selectedValue || uploadFolder || 'Unsorted';
+        if (isLocalFolderOptionValue(uploadFolder)) uploadFolder = 'Unsorted';
+    }
+
+    if (!localFolder) localFolder = getDefaultLocalFolderName();
+    if (!uploadFolder) uploadFolder = 'Unsorted';
+
+    tr2.dataset.localFolder = localFolder;
+    tr2.dataset.uploadFolder = uploadFolder;
+
+    if (fields.localFolderSelect && fields.localFolderSelect.value !== localFolder) {
+        fields.localFolderSelect.value = localFolder;
+    }
+
+    return {
+        localFolder: localFolder,
+        uploadFolder: uploadFolder,
+        selectedValue: selectedValue || 'Unsorted'
+    };
+}
+
+function getGalleryFieldsLocalFolderName(fields) {
+    return syncGalleryFolderStateForFields(fields).localFolder;
+}
+
+function getGalleryFieldsEffectiveUploadFolder(fields) {
+    var state = syncGalleryFolderStateForFields(fields);
+    var selectedValue = String((fields && fields.folderSelect && fields.folderSelect.value) || '').trim();
+    return isLocalFolderOptionValue(selectedValue) ? state.uploadFolder : (selectedValue || state.uploadFolder || 'Unsorted');
+}
+
 function buildGalleryDataFromFields(fields) {
     var existingId = getGalleryGroupSavedDataId(fields);
+    var folderState = syncGalleryFolderStateForFields(fields);
+
     return {
         id: existingId || (Date.now() + '_' + (fields.titleInput ? fields.titleInput.value : '')),
         title1: fields.titleInput ? fields.titleInput.value : '',
@@ -2519,7 +4397,9 @@ function buildGalleryDataFromFields(fields) {
         files: fields.filesCell ? fields.filesCell.textContent : 'N/A',
         category: fields.categorySelect ? fields.categorySelect.value : 'Doujinshi',
         language: fields.languageSelect ? fields.languageSelect.value : '0',
-        folder: fields.folderSelect ? fields.folderSelect.value : 'Unsorted',
+        folder: fields.folderSelect ? fields.folderSelect.value : ('local:' + folderState.localFolder),
+        uploadFolder: folderState.uploadFolder || 'Unsorted',
+        localFolder: folderState.localFolder || getDefaultLocalFolderName(),
         options: {
             official: fields.officialCheckbox ? fields.officialCheckbox.checked : false,
             translated: fields.translatedCheckbox ? fields.translatedCheckbox.checked : false,
@@ -2543,11 +4423,30 @@ function buildGalleryDataFromFields(fields) {
 function persistGalleryGroup(fields) {
     var galleryData = buildGalleryDataFromFields(fields);
     upsertSavedGallery(galleryData);
-    if (fields && fields.tr2) fields.tr2.dataset.savedDataId = galleryData.id;
+    if (fields && fields.tr2) {
+        fields.tr2.dataset.savedDataId = galleryData.id;
+        fields.tr2.dataset.localFolder = galleryData.localFolder || getDefaultLocalFolderName();
+        fields.tr2.dataset.uploadFolder = galleryData.uploadFolder || 'Unsorted';
+        flushPendingFileListDataForGalleryRow(fields.tr2, galleryData.id);
+    }
     return galleryData;
 }
 
+function generateCreateUploadFlowToken() {
+    return 'create_upload_flow_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
+}
+
 function buildPendingCreateDataFromFields(fields) {
+    var existingSavedDataId = getGalleryGroupSavedDataId(fields);
+    if (!existingSavedDataId) {
+        try {
+            var ensuredGalleryData = persistGalleryGroup(fields);
+            existingSavedDataId = ensuredGalleryData && ensuredGalleryData.id ? ensuredGalleryData.id : null;
+        } catch (err) {
+            errorLog('CreateGallery', '建立前自動保存失敗', err && (err.message || err));
+        }
+    }
+
     var categoryMap = {
         'Doujinshi': '2',
         'Manga': '3',
@@ -2570,6 +4469,10 @@ function buildPendingCreateDataFromFields(fields) {
     if (mainVal && !jpVal) jpVal = mainVal;
     else if (!mainVal && jpVal) mainVal = jpVal;
 
+    var folderState = syncGalleryFolderStateForFields(fields);
+    var createTargetFolder = getGalleryFieldsEffectiveUploadFolder(fields);
+    if (!createTargetFolder || isLocalFolderOptionValue(createTargetFolder)) createTargetFolder = 'Unsorted';
+
     return {
         id: Date.now() + '_' + mainVal,
         title1: mainVal,
@@ -2578,11 +4481,16 @@ function buildPendingCreateDataFromFields(fields) {
         category: categoryMap[fields.categorySelect ? fields.categorySelect.value : 'Doujinshi'] || '2',
         categoryText: fields.categorySelect ? fields.categorySelect.value : 'Doujinshi',
         language: fields.languageSelect ? fields.languageSelect.value : '0',
-        folder: fields.folderSelect ? fields.folderSelect.value : 'Unsorted',
+        folder: createTargetFolder,
+        uploadFolder: createTargetFolder,
+        localFolder: folderState.localFolder || getDefaultLocalFolderName(),
         langtype: langTypeVal,
         mtl: fields.mtlCheckbox ? fields.mtlCheckbox.checked : false,
         comment: fields.commentTextarea ? fields.commentTextarea.value : '',
-        savedDataId: getGalleryGroupSavedDataId(fields),
+        savedDataId: existingSavedDataId,
+        createFlowToken: generateCreateUploadFlowToken(),
+        createFlowArmedAt: Date.now(),
+        createTriggerSource: 'script_opened_act_new',
         options: {
             official: fields.officialCheckbox ? fields.officialCheckbox.checked : false,
             translated: fields.translatedCheckbox ? fields.translatedCheckbox.checked : false,
@@ -2648,6 +4556,7 @@ function applyGalleryOptionStateToFields(fields, optionState) {
 function deleteGalleryGroupByFields(fields, folderRow1, waitingCreateCountRef) {
     if (!fields || !fields.group || !fields.group.length) return false;
 
+    var sectionRoot = fields.tr1 ? fields.tr1.closest('.s[data-custom="true"]') : null;
     var savedDataId = getGalleryGroupSavedDataId(fields);
     fields.group.forEach(function(tr) {
         if (tr && tr.parentNode) tr.parentNode.removeChild(tr);
@@ -2662,6 +4571,10 @@ function deleteGalleryGroupByFields(fields, folderRow1, waitingCreateCountRef) {
         } catch (err) {
             errorLog('DeleteGallery', '刪除保存資料失敗', err);
         }
+    }
+
+    if (sectionRoot && typeof sectionRoot.__updateLocalFolderGroupCounts === 'function') {
+        sectionRoot.__updateLocalFolderGroupCounts();
     }
 
     return true;
@@ -2745,6 +4658,81 @@ function alignFilesText(textEl, td) {
     textEl.style.margin = '0';
 }
 
+function _getGalleryActionRowAnchors(tr2) {
+    var optionsGrid = tr2 ? tr2.querySelector('.options-grid') : null;
+    if (!optionsGrid) return [];
+
+    return [0, 3, 6, 9].map(function(index) {
+        return optionsGrid.children[index] || null;
+    }).filter(function(item) {
+        return !!item;
+    });
+}
+
+function _getElementCenterTopWithin(el, container) {
+    if (!el || !container) return null;
+    var elRect = el.getBoundingClientRect();
+    var containerRect = container.getBoundingClientRect();
+    return (elRect.top + elRect.height / 2) - containerRect.top;
+}
+
+function _positionControlInCellByCenter(control, cell, centerTop, leftPx, rightPx) {
+    if (!control || !cell || centerTop === null) return;
+
+    var controlRect = control.getBoundingClientRect();
+    control.style.position = 'absolute';
+    control.style.margin = '0';
+    control.style.top = (centerTop - controlRect.height / 2) + 'px';
+
+    if (leftPx !== null && leftPx !== undefined) {
+        control.style.left = leftPx + 'px';
+        control.style.right = '';
+    } else if (rightPx !== null && rightPx !== undefined) {
+        control.style.right = rightPx + 'px';
+        control.style.left = '';
+    }
+}
+
+function alignGalleryRowActionButtons(tr2) {
+    if (!tr2) return;
+
+    var anchors = _getGalleryActionRowAnchors(tr2);
+    if (!anchors.length) return;
+
+    var fileCell = tr2.querySelector('td.gtc3');
+    var actionCell = tr2.querySelector('td.gtc6');
+    var fileControls = tr2.__fileColumnControls || [];
+    var sideControls = tr2.__sideActionButtons || [];
+    var textCenter = getFilesTextCenter();
+
+    if (fileCell && textCenter !== null && fileControls.length) {
+        fileCell.style.position = 'relative';
+        var fileCellRect = fileCell.getBoundingClientRect();
+
+        fileControls.forEach(function(control, index) {
+            var anchor = anchors[index];
+            var anchorCenterTop = _getElementCenterTopWithin(anchor, fileCell);
+            if (!control || anchorCenterTop === null) return;
+
+            var controlRect = control.getBoundingClientRect();
+            var left = textCenter - fileCellRect.left - controlRect.width / 2;
+            _positionControlInCellByCenter(control, fileCell, anchorCenterTop, left, null);
+        });
+    }
+
+    if (actionCell && sideControls.length) {
+        actionCell.style.position = 'relative';
+
+        sideControls.slice(0, 2).forEach(function(control, index) {
+            var anchor = anchors[index];
+            var anchorCenterTop = _getElementCenterTopWithin(anchor, actionCell);
+            if (!control || anchorCenterTop === null) return;
+
+            _positionControlInCellByCenter(control, actionCell, anchorCenterTop, null, 3.5);
+        });
+    }
+}
+
 // ==================== 頂層函數：applyToChecked ====================
 
 function applyToChecked(tbody, callback) {
@@ -2766,6 +4754,7 @@ function applyToChecked(tbody, callback) {
 
 function allSaveChecked(tbody, folderRow1) {
     var savedCount = 0;
+    var sectionDiv = tbody ? tbody.closest('.s[data-custom="true"]') : null;
 
     getCheckedGalleryGroupsFromTbody(tbody).forEach(function(group) {
         var fields = getGalleryGroupFields(group);
@@ -2773,6 +4762,11 @@ function allSaveChecked(tbody, folderRow1) {
 
         try {
             persistGalleryGroup(fields);
+
+            if (sectionDiv && typeof sectionDiv.__moveGalleryGroupToLocalFolder === 'function') {
+                sectionDiv.__moveGalleryGroupToLocalFolder(group, getGalleryFieldsLocalFolderName(fields));
+            }
+
             savedCount++;
         } catch (err) {
             errorLog('BulkSave', '批量保存失敗', err);
@@ -2780,6 +4774,9 @@ function allSaveChecked(tbody, folderRow1) {
     });
 
     if (savedCount > 0) {
+        if (sectionDiv && typeof sectionDiv.__updateLocalFolderGroupCounts === 'function') {
+            sectionDiv.__updateLocalFolderGroupCounts();
+        }
         opLog('批量 Save', { count: savedCount });
         refreshShowFileListPanelIfOpen();
     }
@@ -2853,9 +4850,12 @@ function allDeleteChecked(tbody, folderRow1, waitingCreateCountRef) {
 function fixAllGroups(sectionDiv, folderRow1) {
     var firstRow = sectionDiv.querySelector('tbody tr:not(.gtr)');
     if (!firstRow) return;
-    sectionDiv.querySelectorAll('td.gtc3').forEach(function(td) {
-        var btns = Array.from(td.querySelectorAll('button'));
-        if (btns.length > 0) alignSwapBtn(btns, td);
+    sectionDiv.querySelectorAll('tbody tr:not(.gtr)').forEach(function(tr) {
+        if (tr.querySelector('td.gtc-options')) {
+            alignGalleryRowActionButtons(tr);
+            if (typeof tr.__positionMtlSpan === 'function') tr.__positionMtlSpan();
+            if (typeof tr.__syncLeftGeometryToFileButtonsOnly === 'function') tr.__syncLeftGeometryToFileButtonsOnly();
+        }
     });
     sectionDiv.querySelectorAll('td.gtc3 span.files-text').forEach(function(span) {
         var td = span.closest('td');
@@ -6344,28 +8344,41 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
 
     var tr1 = document.createElement('tr');
 
+    var leftStretchFieldCss =
+        'flex: 1 1 0% !important;' +
+        'min-width: 0 !important;' +
+        'width: auto !important;' +
+        'box-sizing: border-box !important;';
+
     var td1_1 = document.createElement('td');
     td1_1.className = 'gtc1';
-    td1_1.style.paddingLeft = '10px';
+    td1_1.style.cssText = 'padding: 2px 2px 2px 10px !important; box-sizing: border-box !important; vertical-align: top !important;';
+
+    var leftTopWrap = document.createElement('div');
+    leftTopWrap.style.cssText = 'display: flex; flex-direction: column; width: 100%; gap: 5px; box-sizing: border-box;';
+    td1_1.appendChild(leftTopWrap);
+
+    var mainRow = document.createElement('div');
+    mainRow.style.cssText = 'display: flex; align-items: center; width: 100%; gap: 4px; box-sizing: border-box;';
+    leftTopWrap.appendChild(mainRow);
 
     var mainLabel = document.createElement('span');
     mainLabel.textContent = 'Main:';
-    mainLabel.style.cssText = 'font-size: 9pt; display: inline-block; width: 34px; text-align: left; margin-right: 4px; white-space: nowrap; vertical-align: middle;';
-    td1_1.appendChild(mainLabel);
+    mainLabel.style.cssText = 'font-size: 9pt; display: inline-flex; align-items: center; width: 36px; min-width: 36px; max-width: 36px; text-align: left; white-space: nowrap; flex-shrink: 0;';
+    mainRow.appendChild(mainLabel);
 
     var inputTitle = document.createElement('input');
     inputTitle.type = 'text';
     inputTitle.value = savedData ? savedData.title1 : '';
     inputTitle.style.cssText =
-        'width: calc(100% - 42px) !important;' +
-        'box-sizing: border-box !important;' +
+        leftStretchFieldCss +
         'border: 1px solid #5C0D12 !important;' +
         'background-color: #E0DED3 !important;' +
         'font-size: 9pt !important;' +
         'height: 20px !important;' +
         'padding: 0 4px !important;' +
         'vertical-align: middle !important;';
-    td1_1.appendChild(inputTitle);
+    mainRow.appendChild(inputTitle);
 
     var td1_2 = document.createElement('td');
     td1_2.className = 'gtc3';
@@ -6398,12 +8411,12 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
     var td1_5 = document.createElement('td');
     td1_5.className = 'gtc4';
     td1_5.style.cssText = 'text-align: left !important; padding-left: 2px !important;';
-    var folderSelect = createFolderSelect();
-    if (savedData && savedData.folder) {
-        Array.from(folderSelect.options).forEach(function(opt) {
-            if (opt.value === savedData.folder) opt.selected = true;
-        });
-    }
+    var initialUploadFolderValue = savedData && savedData.uploadFolder
+        ? String(savedData.uploadFolder || '').trim()
+        : ((savedData && savedData.folder && !isLocalFolderOptionValue(savedData.folder)) ? String(savedData.folder || '').trim() : 'Unsorted');
+    if (!initialUploadFolderValue) initialUploadFolderValue = 'Unsorted';
+    var initialLocalFolderValue = savedData ? getSavedGalleryLocalFolderName(savedData) : getDefaultLocalFolderName();
+    var folderSelect = createUploadFolderSelect(initialUploadFolderValue);
     td1_5.appendChild(folderSelect);
 
     var td1_6 = document.createElement('td');
@@ -6426,38 +8439,52 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
 
     var td2_1 = document.createElement('td');
     td2_1.className = 'gtc1';
-    td2_1.style.cssText = 'padding-left: 10px !important; vertical-align: top !important; padding-top: 2px !important;';
+    td2_1.style.cssText = 'padding: 2px 2px 2px 10px !important; box-sizing: border-box !important; vertical-align: top !important;';
+
+    var leftBottomWrap = document.createElement('div');
+    leftBottomWrap.style.cssText = 'display: flex; flex-direction: column; width: 100%; gap: 5px; box-sizing: border-box;';
+    td2_1.appendChild(leftBottomWrap);
+
+    var jpRow = document.createElement('div');
+    jpRow.style.cssText = 'display: flex; align-items: center; width: 100%; gap: 4px; box-sizing: border-box;';
+    leftBottomWrap.appendChild(jpRow);
 
     var jpLabel = document.createElement('span');
     jpLabel.textContent = 'JP:';
-    jpLabel.style.cssText = 'font-size: 9pt; display: inline-block; width: 34px; text-align: left; margin-right: 4px; white-space: nowrap; vertical-align: top; padding-top: 2px;';
-    td2_1.appendChild(jpLabel);
+    jpLabel.style.cssText = 'font-size: 9pt; display: inline-flex; align-items: center; width: 36px; min-width: 36px; max-width: 36px; text-align: left; white-space: nowrap; flex-shrink: 0;';
+    jpRow.appendChild(jpLabel);
 
     var inputTitle2 = document.createElement('input');
     inputTitle2.type = 'text';
     inputTitle2.value = savedData ? savedData.title2 : '';
     inputTitle2.style.cssText =
-        'width: calc(100% - 42px) !important;' +
-        'box-sizing: border-box !important;' +
+        leftStretchFieldCss +
         'border: 1px solid #5C0D12 !important;' +
         'background-color: #E0DED3 !important;' +
         'font-size: 9pt !important;' +
         'height: 20px !important;' +
         'padding: 0 4px !important;' +
-        'vertical-align: top !important;';
-    td2_1.appendChild(inputTitle2);
+        'vertical-align: middle !important;';
+    jpRow.appendChild(inputTitle2);
 
     var tplRow = document.createElement('div');
-    tplRow.style.cssText = 'display: flex; justify-content: flex-start; align-items: center; gap: 4px; margin-top: 2px; width: 100%; box-sizing: border-box; padding-right: 4px;';
+    tplRow.style.cssText = 'display: flex; align-items: center; width: 100%; gap: 4px; box-sizing: border-box;';
+    leftBottomWrap.appendChild(tplRow);
 
     var tplLabel = document.createElement('span');
-    tplLabel.textContent = 'Comment Template:';
-    tplLabel.style.cssText = 'font-size: 9pt; white-space: nowrap; flex-shrink: 0;';
+    tplLabel.textContent = 'Template:';
+    tplLabel.style.cssText = 'font-size: 9pt; font-weight: bold; white-space: nowrap; flex-shrink: 0; display: inline-flex; align-items: center; height: 22px;';
     tplRow.appendChild(tplLabel);
 
     var tplSelect = document.createElement('select');
     tplSelect.className = 'comment-template-select';
     applySelectStyle(tplSelect, '130px');
+    tplSelect.style.setProperty('width', '130px', 'important');
+    tplSelect.style.setProperty('min-width', '130px', 'important');
+    tplSelect.style.setProperty('max-width', '130px', 'important');
+    tplSelect.style.setProperty('flex', '0 0 130px', 'important');
+    tplSelect.style.setProperty('box-sizing', 'border-box', 'important');
+    tplSelect.style.setProperty('font-size', '9pt', 'important');
     var noneOpt = document.createElement('option');
     noneOpt.value = '';
     noneOpt.textContent = '----------None----------';
@@ -6473,7 +8500,7 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
 
     var tplGoBtn = document.createElement('button');
     tplGoBtn.textContent = 'GO';
-    tplGoBtn.style.cssText = 'background-color: #E0DED3; border: 1px solid #5C0D12; color: #5C0D12; font-weight: bold; font-size: 9pt; padding: 0 6px; cursor: pointer; border-radius: 3px; white-space: nowrap; height: 18px; line-height: 16px; box-sizing: border-box; flex-shrink: 0;';
+    tplGoBtn.style.cssText = 'background-color: #E0DED3; border: 1px solid #5C0D12; color: #5C0D12; font-weight: bold; font-size: 9pt; padding: 0 6px; cursor: pointer; border-radius: 3px; white-space: nowrap; height: 22px; line-height: 20px; box-sizing: border-box; flex-shrink: 0;';
     tplGoBtn.addEventListener('click', function(e) {
         e.preventDefault();
         if (!tplSelect.value) return;
@@ -6481,15 +8508,25 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
         var found = templates.find(function(t) { return t.id === tplSelect.value; });
         if (found) {
             uploaderCommentTA.value = found.content;
-            uploaderCommentTA.style.height = 'auto';
+            uploaderCommentTA.style.height = '24px';
             uploaderCommentTA.style.height = uploaderCommentTA.scrollHeight + 'px';
         }
     });
     tplRow.appendChild(tplGoBtn);
 
-    var tplSpacer = document.createElement('div');
-    tplSpacer.style.cssText = 'flex: 1;';
-    tplRow.appendChild(tplSpacer);
+    var localFolderLabel = document.createElement('span');
+    localFolderLabel.textContent = 'Local Folder:';
+    localFolderLabel.style.cssText = 'font-size: 9pt; font-weight: bold; white-space: nowrap; flex-shrink: 0; display: inline-flex; align-items: center; height: 22px;';
+    tplRow.appendChild(localFolderLabel);
+
+    var localFolderSelect = createLocalFolderSelect(initialLocalFolderValue);
+    localFolderSelect.className = 'local-folder-select';
+    localFolderSelect.style.setProperty('flex', '1 1 0%', 'important');
+    localFolderSelect.style.setProperty('min-width', '0', 'important');
+    localFolderSelect.style.setProperty('width', 'auto', 'important');
+    localFolderSelect.style.setProperty('box-sizing', 'border-box', 'important');
+    localFolderSelect.style.setProperty('font-size', '9pt', 'important');
+    tplRow.appendChild(localFolderSelect);
 
     var romanBtn = document.createElement('button');
     romanBtn.textContent = 'Romanization';
@@ -6498,8 +8535,6 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
         e.preventDefault();
         runGalleryGroupRomanization(getGalleryGroupFields([tr1, tr2]));
     });
-    tplRow.appendChild(romanBtn);
-    td2_1.appendChild(tplRow);
 
     var td2_2 = document.createElement('td');
     td2_2.className = 'gtc3';
@@ -6519,6 +8554,8 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
 
     var savedDataId = (savedData && savedData.id && savedData.id !== 'undefined') ? savedData.id : null;
     if (savedDataId) tr2.dataset.savedDataId = savedDataId;
+    tr2.dataset.localFolder = initialLocalFolderValue;
+    tr2.dataset.uploadFolder = initialUploadFolderValue;
 
     var zipBtn = document.createElement('button');
     zipBtn.textContent = 'ZIP';
@@ -6533,6 +8570,8 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
         selectAuthorizedArchiveFilesWithPicker().then(function(selection) {
             var files = selection.files || [];
             if (!files.length) return;
+
+            var archiveSourceFiles = createArchiveSourceFileEntriesFromAuthorizedSelection(selection);
 
             flowLog('ZIP', '開始處理壓縮檔', files.map(function(file) {
                 return file.name;
@@ -6560,17 +8599,15 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
                 filesSpan.textContent = allFiles.length;
                 requestAnimationFrame(function() { alignFilesText(filesSpan, td1_2); });
 
-                if (savedDataId) {
-                    writeGalleryFileListById(
-                        savedDataId,
-                        null,
-                        allFiles,
-                        'archive',
-                        rootSources[0] ? rootSources[0].name : null,
-                        rootSources,
-                        null
-                    );
-                }
+                saveOrQueueGalleryFileListForRow(tr2, savedDataId, {
+                    folderName: null,
+                    files: allFiles,
+                    sourceType: 'archive',
+                    sourceLabel: rootSources[0] ? rootSources[0].name : null,
+                    rootSources: rootSources,
+                    authorizedRootId: null,
+                    archiveSourceFiles: archiveSourceFiles
+                });
                 refreshShowFileListPanelIfOpen();
 
                 flashColoredSuccessState(archiveStatusBtn, '✓', '', confirmColorMs);
@@ -6661,7 +8698,7 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
 
                 var folderSourceLabel = relativeRootPath || dirHandle.name;
                 var rootSources = [{ name: folderSourceLabel, type: 'folder' }];
-                var prefixedImageFiles = createGallerySourcePrefixedFileEntries(imageFiles, relativeRootPath);
+                var preciseImageFiles = createPreciseFolderSourceFileEntries(imageFiles, relativeRootPath);
 
                 opLog('掃描資料夾完成', {
                     folderName: folderSourceLabel,
@@ -6673,17 +8710,15 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
                 filesSpan.textContent = imageFiles.length;
                 requestAnimationFrame(function() { alignFilesText(filesSpan, td1_2); });
 
-                if (savedDataId) {
-                    writeGalleryFileListById(
-                        savedDataId,
-                        relativeRootPath || '',
-                        prefixedImageFiles,
-                        'folder',
-                        folderSourceLabel,
-                        rootSources,
-                        authorizedRootEntry ? authorizedRootEntry.id : null
-                    );
-                }
+                saveOrQueueGalleryFileListForRow(tr2, savedDataId, {
+                    folderName: relativeRootPath || '',
+                    files: preciseImageFiles,
+                    sourceType: 'folder',
+                    sourceLabel: folderSourceLabel,
+                    rootSources: rootSources,
+                    authorizedRootId: authorizedRootEntry ? authorizedRootEntry.id : null,
+                    archiveSourceFiles: []
+                });
                 refreshShowFileListPanelIfOpen();
 
                 var confirmColorMs = currentSettings.confirmBtnColorMs || 1000;
@@ -6747,7 +8782,7 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
 
     var optionsGrid = document.createElement('div');
     optionsGrid.className = 'options-grid';
-    optionsGrid.style.cssText = 'display: grid !important; grid-template-columns: repeat(3, max-content) !important; gap: 4px 16px !important; align-items: start !important;';
+    optionsGrid.style.cssText = 'display: grid !important; grid-template-columns: repeat(3, max-content) !important; grid-template-rows: repeat(4, 20px) !important; column-gap: 16px !important; row-gap: 0 !important; align-items: center !important;';
 
     var cbOfficialTextless = createPlainCheckbox('Official / Textless', mutexGroup, false);
     var cbAIGenerated      = createPlainCheckbox('AI Generated/AI生成', '', true);
@@ -6758,10 +8793,41 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
     var cbRewrite          = createPlainCheckbox('Rewrite', mutexGroup, false);
     var cbColorized        = createPlainCheckbox('Colorized/カラー化', '', true);
     var cbOngoing          = createPlainCheckbox('Ongoing/進行中', '', true);
-    var cbMtlPlaceholder   = document.createElement('span');
-    cbMtlPlaceholder.style.cssText = 'display: inline-block; width: 1px; height: 1px;';
+    var romanBtnSlot = document.createElement('div');
+    romanBtnSlot.style.cssText = 'display: flex; align-items: center; justify-content: flex-start; white-space: nowrap; align-self: center; margin: 0; padding: 0; line-height: 1; height: 20px;';
+    romanBtn.style.cssText += 'margin: 0 !important; vertical-align: middle !important; align-self: center !important;';
+    romanBtnSlot.appendChild(romanBtn);
     var cbDigital          = createPlainCheckbox('Digital/DL版', '', true);
     var cbSample           = createPlainCheckbox('Sample/見本', '', true);
+
+    [
+        cbOfficialTextless,
+        cbAIGenerated,
+        cbAnthology,
+        cbTranslated,
+        cbDecensored,
+        cbIncomplete,
+        cbRewrite,
+        cbColorized,
+        cbOngoing,
+        cbDigital,
+        cbSample
+    ].forEach(function(cb) {
+        if (!cb || !cb.container || !cb.checkbox) return;
+
+        cb.container.style.display = 'inline-flex';
+        cb.container.style.alignItems = 'center';
+        cb.container.style.alignSelf = 'center';
+        cb.container.style.verticalAlign = 'middle';
+        cb.container.style.whiteSpace = 'nowrap';
+        cb.container.style.margin = '0';
+        cb.container.style.padding = '0';
+        cb.container.style.height = '20px';
+
+        cb.checkbox.style.margin = '0 4px 0 0';
+        cb.checkbox.style.verticalAlign = 'middle';
+        cb.checkbox.style.flexShrink = '0';
+    });
 
     optionsGrid.appendChild(cbOfficialTextless.container);
     optionsGrid.appendChild(cbAIGenerated.container);
@@ -6772,7 +8838,7 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
     optionsGrid.appendChild(cbRewrite.container);
     optionsGrid.appendChild(cbColorized.container);
     optionsGrid.appendChild(cbOngoing.container);
-    optionsGrid.appendChild(cbMtlPlaceholder);
+    optionsGrid.appendChild(romanBtnSlot);
     optionsGrid.appendChild(cbDigital.container);
     optionsGrid.appendChild(cbSample.container);
     td2_merge.appendChild(optionsGrid);
@@ -6852,18 +8918,44 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
         handleGalleryLanguageControlChange(this);
     });
 
+    folderSelect.addEventListener('change', function() {
+        var currentFields = getGalleryGroupFields([tr1, tr2]);
+        var folderState = syncGalleryFolderStateForFields(currentFields);
+
+        if (sectionDiv && typeof sectionDiv.__moveGalleryGroupToLocalFolder === 'function') {
+            sectionDiv.__moveGalleryGroupToLocalFolder([tr1, tr2], folderState.localFolder);
+        }
+    });
+
+    localFolderSelect.addEventListener('change', function() {
+        tr2.dataset.localFolder = String(localFolderSelect.value || '').trim() || getDefaultLocalFolderName();
+    });
+
     var uploaderRow = document.createElement('div');
-    uploaderRow.style.cssText = 'display: flex; align-items: flex-start; gap: 6px; margin-top: 4px; width: 100%; box-sizing: border-box; padding-right: 4px;';
+    uploaderRow.style.cssText = 'display: flex; align-items: flex-start; width: 100%; gap: 6px; box-sizing: border-box;';
+    leftBottomWrap.appendChild(uploaderRow);
 
     var uploaderBtn = document.createElement('button');
     uploaderBtn.textContent = 'Uploader Comment';
-    uploaderBtn.style.cssText = 'background-color: #E0DED3; border: 1px solid #5C0D12; color: #5C0D12; font-weight: bold; font-size: 9pt; padding: 2px 8px; cursor: pointer; border-radius: 3px; white-space: nowrap; height: 24px; line-height: 20px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; flex-shrink: 0;';
+    uploaderBtn.style.cssText = 'background-color: #E0DED3; border: 1px solid #5C0D12; color: #5C0D12; font-weight: bold; font-size: 9pt; padding: 2px 12px; cursor: pointer; border-radius: 3px; white-space: nowrap; height: 24px; line-height: 20px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; flex-shrink: 0;';
     uploaderRow.appendChild(uploaderBtn);
 
     var uploaderCommentTA = document.createElement('textarea');
     uploaderCommentTA.className = 'uploader-comment-ta';
     uploaderCommentTA.rows = 1;
-    uploaderCommentTA.style.cssText = 'flex: 1 1 0; min-width: 0; border: 1px solid #5C0D12; background-color: #E0DED3; font-size: 9pt; padding: 2px 4px; resize: none; overflow-y: hidden; font-family: inherit; box-sizing: border-box; min-height: 24px; height: 24px; line-height: 20px; margin: 0;';
+    uploaderCommentTA.style.cssText =
+        leftStretchFieldCss +
+        'border: 1px solid #5C0D12 !important;' +
+        'background-color: #E0DED3 !important;' +
+        'font-size: 9pt !important;' +
+        'padding: 2px 4px !important;' +
+        'resize: none !important;' +
+        'overflow-y: hidden !important;' +
+        'font-family: inherit !important;' +
+        'min-height: 24px !important;' +
+        'height: 24px !important;' +
+        'line-height: 20px !important;' +
+        'margin: 0 !important;';
     if (savedData && savedData.comment) { uploaderCommentTA.value = savedData.comment; }
     uploaderCommentTA.addEventListener('input', function() {
         this.style.height = '24px';
@@ -6887,12 +8979,18 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
 
     var saveCommentBtn = document.createElement('button');
     saveCommentBtn.textContent = 'save';
-    saveCommentBtn.style.cssText = 'background-color: #E0DED3; border: 1px solid #5C0D12; color: #5C0D12; font-weight: bold; font-size: 9pt; padding: 2px 8px; cursor: pointer; border-radius: 3px; white-space: nowrap; height: 24px; line-height: 20px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; flex-shrink: 0;';
+    saveCommentBtn.style.cssText = 'background-color: #E0DED3; border: 1px solid #5C0D12; color: #5C0D12; font-weight: bold; font-size: 9pt; padding: 2px 12px; cursor: pointer; border-radius: 3px; white-space: nowrap; height: 24px; line-height: 20px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; flex-shrink: 0;';
     saveCommentBtn.addEventListener('click', function(e) {
         e.preventDefault();
         try {
-            var galleryData = persistGalleryGroup(getGalleryGroupFields([tr1, tr2]));
+            var galleryFields = getGalleryGroupFields([tr1, tr2]);
+            var galleryData = persistGalleryGroup(galleryFields);
             savedDataId = galleryData.id;
+
+            if (sectionDiv && typeof sectionDiv.__moveGalleryGroupToLocalFolder === 'function') {
+                sectionDiv.__moveGalleryGroupToLocalFolder([tr1, tr2], getGalleryFieldsLocalFolderName(galleryFields));
+            }
+
             flashButtonSavedState(saveCommentBtn, '已儲存 ✓', 'save', 500);
             opLog('保存畫廊', { id: galleryData.id, title: galleryData.title1 || galleryData.title2 || '' });
             refreshShowFileListPanelIfOpen();
@@ -6901,11 +8999,170 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
         }
     });
     uploaderRow.appendChild(saveCommentBtn);
-    td2_1.appendChild(uploaderRow);
+
+    function syncLeftGeometryToFileButtonsOnly() {
+        if (!inputTitle || !inputTitle2 || !tplSelect || !tplGoBtn || !localFolderLabel || !localFolderSelect || !uploaderCommentTA || !saveCommentBtn) return;
+        if (!swapBtn || !zipBtn || !folderScanBtn || !archiveStatusBtn) return;
+        if (!td2_merge || !td2_merge.querySelector) return;
+
+        function getRect(el) {
+            if (!el || !el.getBoundingClientRect) return null;
+            var rect = el.getBoundingClientRect();
+            if (!isFinite(rect.left) || !isFinite(rect.right) || rect.width <= 0 || rect.height <= 0) return null;
+            return rect;
+        }
+
+        function measureTextWidth(text, referenceEl) {
+            var span = document.createElement('span');
+            var style = null;
+
+            try {
+                style = getComputedStyle(referenceEl);
+            } catch (e) {}
+
+            span.textContent = text || '';
+            span.style.position = 'fixed';
+            span.style.left = '-99999px';
+            span.style.top = '0';
+            span.style.visibility = 'hidden';
+            span.style.whiteSpace = 'nowrap';
+            span.style.padding = '0';
+            span.style.margin = '0';
+
+            if (style) {
+                span.style.font = style.font || '';
+                span.style.fontSize = style.fontSize || '';
+                span.style.fontWeight = style.fontWeight || '';
+                span.style.fontFamily = style.fontFamily || '';
+                span.style.letterSpacing = style.letterSpacing || '';
+                span.style.textTransform = style.textTransform || '';
+            }
+
+            document.body.appendChild(span);
+            var width = span.getBoundingClientRect().width;
+            span.remove();
+            return width;
+        }
+
+        function estimateSelectSafeWidth(selectEl) {
+            if (!selectEl) return 120;
+
+            var style = null;
+            try {
+                style = getComputedStyle(selectEl);
+            } catch (e) {}
+
+            var selectedText = '';
+            if (selectEl.options && selectEl.selectedIndex >= 0 && selectEl.options[selectEl.selectedIndex]) {
+                selectedText = selectEl.options[selectEl.selectedIndex].textContent || '';
+            } else {
+                selectedText = selectEl.value || '';
+            }
+
+            var textWidth = measureTextWidth(String(selectedText || '').trim(), selectEl);
+            var paddingLeft = style ? parseFloat(style.paddingLeft || '0') : 0;
+            var paddingRight = style ? parseFloat(style.paddingRight || '0') : 0;
+            var borderLeft = style ? parseFloat(style.borderLeftWidth || '0') : 0;
+            var borderRight = style ? parseFloat(style.borderRightWidth || '0') : 0;
+            var width = Math.ceil(textWidth + paddingLeft + paddingRight + borderLeft + borderRight + 34 + 14);
+
+            return Math.max(120, width);
+        }
+
+        function setExactWidth(control, widthPx, minWidth) {
+            if (!control || !isFinite(widthPx)) return;
+
+            widthPx = Math.max(minWidth || 40, Math.floor(widthPx));
+            control.style.setProperty('flex', '0 0 auto', 'important');
+            control.style.setProperty('width', widthPx + 'px', 'important');
+            control.style.setProperty('min-width', widthPx + 'px', 'important');
+            control.style.setProperty('max-width', widthPx + 'px', 'important');
+            control.style.setProperty('box-sizing', 'border-box', 'important');
+        }
+
+        var fileRects = [swapBtn, zipBtn, folderScanBtn, archiveStatusBtn].map(getRect).filter(function(rect) {
+            return !!rect;
+        });
+        if (!fileRects.length) return;
+
+        var rightCheckbox = td2_merge.querySelector('.options-grid input[type="checkbox"]');
+        var rightCheckboxRect = getRect(rightCheckbox);
+        if (!rightCheckboxRect) return;
+
+        var leftTopCellRect = getRect(td1_1);
+        var leftBottomCellRect = getRect(td2_1);
+        if (!leftTopCellRect || !leftBottomCellRect) return;
+
+        var fileBoxLeft = Math.min.apply(null, fileRects.map(function(rect) {
+            return rect.left;
+        }));
+        var fileBoxRight = Math.max.apply(null, fileRects.map(function(rect) {
+            return rect.right;
+        }));
+
+        if (!isFinite(fileBoxLeft) || !isFinite(fileBoxRight)) return;
+
+        var desiredGap = Math.max(0, rightCheckboxRect.left - fileBoxRight);
+        var targetRight = fileBoxLeft - desiredGap;
+        var maxSafeRight = Math.floor(Math.min(leftTopCellRect.right, leftBottomCellRect.right) - 2);
+
+        if (!isFinite(targetRight) || !isFinite(maxSafeRight)) return;
+        targetRight = Math.floor(Math.min(targetRight, maxSafeRight));
+
+        var rowGap = 4;
+        try {
+            if (tplRow) {
+                var rowStyle = getComputedStyle(tplRow);
+                var parsedGap = parseFloat(rowStyle.columnGap || rowStyle.gap || '4');
+                if (isFinite(parsedGap)) rowGap = parsedGap;
+            }
+        } catch (e) {}
+
+        var mainRect = getRect(inputTitle);
+        var jpRect = getRect(inputTitle2);
+        var tplRect = getRect(tplSelect);
+        var goRect = getRect(tplGoBtn);
+        var labelRect = getRect(localFolderLabel);
+        var localRect = getRect(localFolderSelect);
+        var textareaRect = getRect(uploaderCommentTA);
+        var saveRect = getRect(saveCommentBtn);
+
+        if (!mainRect || !jpRect || !tplRect || !goRect || !labelRect || !localRect || !textareaRect || !saveRect) return;
+
+        var localSafeWidth = estimateSelectSafeWidth(localFolderSelect);
+        var goFixedWidth = Math.floor(goRect.width);
+        var labelFixedWidth = Math.floor(labelRect.width);
+        var nextMainWidth = targetRight - mainRect.left;
+        var nextJPWidth = targetRight - jpRect.left;
+        var nextTemplateWidth = targetRight - tplRect.left - (rowGap * 3) - goFixedWidth - labelFixedWidth - localSafeWidth;
+        var nextTextareaWidth = targetRight - textareaRect.left - saveRect.width - 6;
+
+        if (nextMainWidth > 40) {
+            setExactWidth(inputTitle, nextMainWidth, 40);
+        }
+
+        if (nextJPWidth > 40) {
+            setExactWidth(inputTitle2, nextJPWidth, 40);
+        }
+
+        setExactWidth(tplGoBtn, goFixedWidth, 40);
+        setExactWidth(localFolderLabel, labelFixedWidth, labelFixedWidth);
+        setExactWidth(localFolderSelect, localSafeWidth, 120);
+
+        if (nextTemplateWidth > 60) {
+            setExactWidth(tplSelect, nextTemplateWidth, 60);
+        }
+
+        if (nextTextareaWidth > 40) {
+            setExactWidth(uploaderCommentTA, nextTextareaWidth, 40);
+        }
+    }
+
+    tr2.__syncLeftGeometryToFileButtonsOnly = syncLeftGeometryToFileButtonsOnly;
 
     var td2_6 = document.createElement('td');
     td2_6.className = 'gtc6';
-    td2_6.style.cssText = 'padding-right: 3.5px !important; display: flex !important; flex-direction: column !important; align-items: flex-end !important; justify-content: flex-start !important; gap: 2px !important; vertical-align: top !important; padding-top: 2px !important;';
+    td2_6.style.cssText = 'padding-right: 3.5px !important; position: relative !important; vertical-align: top !important; padding-top: 0 !important;';
 
     var plusBtn = document.createElement('button');
     plusBtn.textContent = '+';
@@ -6939,16 +9196,70 @@ function createGalleryGroup(groupIndex, savedData, tbody, folderRow1, sectionDiv
     });
     td2_6.appendChild(deleteBtn);
 
+    tr2.__fileColumnControls = [swapBtn, zipBtn, folderScanBtn, archiveStatusBtn];
+    tr2.__sideActionButtons = [plusBtn, deleteBtn];
+
     tr2.appendChild(td2_1);
     tr2.appendChild(td2_2);
     tr2.appendChild(td2_merge);
     tr2.appendChild(td2_6);
     fragment.appendChild(tr2);
 
+    tr2.__syncLeftGeometryToFileButtonsOnly = syncLeftGeometryToFileButtonsOnly;
+    tr2.__positionMtlSpan = positionMtlSpan;
+
+    if (!savedData) {
+        applyLanguageDefaultsByControls(langSelect.value, getGalleryGroupLanguageDefaultControls(tr2));
+    }
+
+    (function prepareGalleryGroupLayoutBeforeShow() {
+        tr1.style.visibility = 'hidden';
+        tr2.style.visibility = 'hidden';
+
+        function finalizeShow() {
+            tr1.style.visibility = '';
+            tr2.style.visibility = '';
+        }
+
+        function tryPrepareLayout(retryCount) {
+            if (!tr1.isConnected || !tr2.isConnected) {
+                if (retryCount > 0) {
+                    setTimeout(function() {
+                        tryPrepareLayout(retryCount - 1);
+                    }, 0);
+                } else {
+                    finalizeShow();
+                }
+                return;
+            }
+
+            positionMtlSpan();
+            alignGalleryRowActionButtons(tr2);
+            alignFilesText(filesSpan, td1_2);
+            syncLeftGeometryToFileButtonsOnly();
+            finalizeShow();
+        }
+
+        setTimeout(function() {
+            tryPrepareLayout(8);
+        }, 0);
+    })();
+
     return fragment;
 }
 
 // ==================== 頂層函數：loadSavedGalleries ====================
+
+function refreshOpenAutoCreateLocalFolderGroupsIfOpen() {
+    var customSection = document.querySelector('.s[data-custom="true"]');
+    if (!customSection) return;
+
+    if (typeof customSection.__rebuildLocalFolderGroups === 'function') {
+        customSection.__rebuildLocalFolderGroups();
+    } else if (typeof customSection.__updateLocalFolderGroupCounts === 'function') {
+        customSection.__updateLocalFolderGroupCounts();
+    }
+}
 
 function loadSavedGalleries(tbody, folderRow1, folderRight1, sectionDiv, waitingCreateCountRef) {
     try {
@@ -6963,26 +9274,27 @@ function loadSavedGalleries(tbody, folderRow1, folderRight1, sectionDiv, waiting
         }
         if (validSaved.length === 0) return;
 
-        var folderToggle1 = folderRow1.querySelector('.folder-toggle');
-        if (folderToggle1 && folderToggle1.textContent === '[+]') {
-            var nextRowCheck = folderRow1.nextElementSibling;
-            while (nextRowCheck) {
-                nextRowCheck.style.display = 'table-row';
-                nextRowCheck = nextRowCheck.nextElementSibling;
-            }
-            folderToggle1.textContent = '[-]';
-            var spans = folderRight1.querySelectorAll('span');
-            spans.forEach(function(span) { span.style.display = ''; });
+        if (sectionDiv && typeof sectionDiv.__rebuildLocalFolderGroups === 'function') {
+            sectionDiv.__rebuildLocalFolderGroups();
         }
 
         validSaved.forEach(function(galleryData) {
             var newGroup = createGalleryGroup(waitingCreateCountRef.value, galleryData, tbody, folderRow1, sectionDiv, waitingCreateCountRef);
             tbody.appendChild(newGroup);
+
+            var tr2 = tbody.lastElementChild;
+            var tr1 = tr2 ? tr2.previousElementSibling : null;
+            if (tr1 && tr2 && sectionDiv && typeof sectionDiv.__moveGalleryGroupToLocalFolder === 'function') {
+                sectionDiv.__moveGalleryGroupToLocalFolder([tr1, tr2], getSavedGalleryLocalFolderName(galleryData));
+            }
+
             waitingCreateCountRef.value++;
         });
 
-        var folderStrong1 = folderRow1.querySelector('strong');
-        if (folderStrong1) folderStrong1.textContent = waitingCreateCountRef.value;
+        if (sectionDiv && typeof sectionDiv.__updateLocalFolderGroupCounts === 'function') {
+            sectionDiv.__updateLocalFolderGroupCounts();
+        }
+
         requestAnimationFrame(function() { fixAllGroups(sectionDiv, folderRow1); });
         flowLog('SavedGalleries', '已載入等待建立圖庫', validSaved.length);
     } catch (error) {
@@ -9309,36 +11621,30 @@ function createShowFileListPanel() {
     var sortingLabel = document.createElement('span');
     sortingLabel.textContent = 'Sorting Method:';
     sortingLabel.style.cssText = 'font-size: 9pt; white-space: nowrap; flex-shrink: 0; color: #5C0D12; font-weight: bold;';
-    topRow.appendChild(sortingLabel);
 
     var sortingSelect = document.createElement('select');
     applySelectStyle(sortingSelect, '90px');
     sortingSelect.style.flexShrink = '0';
     var sortNatural = document.createElement('option'); sortNatural.value = 'natural'; sortNatural.textContent = '自然排序'; sortingSelect.appendChild(sortNatural);
     var sortLexical = document.createElement('option'); sortLexical.value = 'lexical'; sortLexical.textContent = '詞典序排序'; sortingSelect.appendChild(sortLexical);
-    topRow.appendChild(sortingSelect);
 
     var sortGoBtn = document.createElement('button');
     sortGoBtn.textContent = 'GO';
     applyPageToneBtnStyle(sortGoBtn, 'padding: 0 8px;height: 20px;line-height: 18px;flex-shrink: 0;');
-    topRow.appendChild(sortGoBtn);
 
     var galleryFileLabel = document.createElement('span');
     galleryFileLabel.textContent = 'Gallery File:';
     galleryFileLabel.style.cssText = 'font-size: 9pt; white-space: nowrap; flex-shrink: 0; color: #5C0D12; font-weight: bold; margin-left: 8px;';
-    topRow.appendChild(galleryFileLabel);
 
     var actionSelect = document.createElement('select');
     applySelectStyle(actionSelect, '70px');
     actionSelect.style.flexShrink = '0';
     var saveOpt = document.createElement('option'); saveOpt.value = 'save'; saveOpt.textContent = 'Save'; actionSelect.appendChild(saveOpt);
     var delOpt = document.createElement('option'); delOpt.value = 'delete'; delOpt.textContent = 'Delete'; actionSelect.appendChild(delOpt);
-    topRow.appendChild(actionSelect);
 
     var actionGoBtn = document.createElement('button');
     actionGoBtn.textContent = 'GO';
     applyPageToneBtnStyle(actionGoBtn, 'padding: 0 8px;height: 20px;line-height: 18px;flex-shrink: 0;');
-    topRow.appendChild(actionGoBtn);
 
     var fileListAllSaveBtn = document.createElement('button');
     fileListAllSaveBtn.textContent = 'All Save';
@@ -9502,6 +11808,7 @@ function createShowFileListPanel() {
     var currentSortDirection = 'asc';
     var pendingDeletedGalleryFileKeys = [];
     var renamerCurrentSortDirection = 'asc';
+    var fileListFolderExpandState = {};
     var importExportTextarea = null;
 
     function getImportExportTextareaSafe() {
@@ -10071,6 +12378,8 @@ function createShowFileListPanel() {
     }
 
     function loadCurrentGalleryFilesSorted(galleryId) {
+        fileListFolderExpandState = {};
+
         if (!galleryId) {
             currentFiles = [];
             pendingDeletedGalleryFileKeys = [];
@@ -10093,11 +12402,15 @@ function createShowFileListPanel() {
     function writeCurrentGalleryFiles() {
         if (!currentGalleryId) return;
         var currentData = readGalleryFileListById(currentGalleryId);
-        writeGalleryFileListById(currentGalleryId, currentData.folderName, currentFiles);
+        var persistedFiles = buildFolderAwareUploadPlanFromFlatFiles(currentFiles);
+        writeGalleryFileListById(currentGalleryId, currentData.folderName, persistedFiles);
+        currentFiles = persistedFiles.slice();
         pendingDeletedGalleryFileKeys = [];
     }
 
     function restoreCurrentGalleryFilesFromSaved() {
+        fileListFolderExpandState = {};
+
         if (!currentGalleryId) {
             currentFiles = [];
             return;
@@ -10123,6 +12436,63 @@ function createShowFileListPanel() {
         if (file.originalName) return String(file.originalName);
         if (file.path) return String(getGalleryFileLeafNameFromPath(file.path) || file.path);
         return '';
+    }
+
+    function buildShowFileListTree(files) {
+        var root = {
+            items: [],
+            folders: {}
+        };
+
+        normalizeGalleryFileListEntries(files).forEach(function(fileEntry, index) {
+            var displayPath = String(
+                fileEntry.path ||
+                fileEntry.originalPath ||
+                fileEntry.originalName ||
+                fileEntry.name ||
+                ''
+            ).trim();
+
+            var parts = displayPath.split('/').filter(function(part) {
+                return !!part;
+            });
+
+            var node = root;
+            var folderPath = '';
+
+            parts.slice(0, -1).forEach(function(folderName) {
+                folderPath = folderPath ? (folderPath + '/' + folderName) : folderName;
+
+                if (!node.folders[folderName]) {
+                    node.folders[folderName] = {
+                        items: [],
+                        folders: {},
+                        folderName: folderName,
+                        folderPath: folderPath
+                    };
+                    node.items.push({
+                        type: 'folder',
+                        name: folderName,
+                        path: folderPath
+                    });
+                }
+
+                node = node.folders[folderName];
+            });
+
+            node.items.push({
+                type: 'file',
+                index: index,
+                file: fileEntry
+            });
+        });
+
+        return root;
+    }
+
+    function isShowFileListFolderExpanded(folderPath) {
+        if (!Object.prototype.hasOwnProperty.call(fileListFolderExpandState, folderPath)) return true;
+        return fileListFolderExpandState[folderPath] !== false;
     }
 
     function sortCurrentFilesForRenamer(direction) {
@@ -10173,7 +12543,7 @@ function createShowFileListPanel() {
         syncRenamerInputsToCurrentFiles();
 
         var currentData = readGalleryFileListById(currentGalleryId);
-        var savedFiles = Array.isArray(currentData.files) ? currentData.files.slice() : [];
+        var savedFiles = buildFolderAwareUploadPlanFromFlatFiles(Array.isArray(currentData.files) ? currentData.files.slice() : []);
         var deletedSet = {};
         pendingDeletedGalleryFileKeys.forEach(function(key) {
             deletedSet[key] = true;
@@ -10203,8 +12573,10 @@ function createShowFileListPanel() {
             if (idx < currentSelectedFiles.length) savedFiles[pos] = currentSelectedFiles[idx];
         });
 
-        writeGalleryFileListById(currentGalleryId, currentData.folderName, savedFiles);
-        currentFiles = savedFiles.slice();
+        var persistedFiles = buildFolderAwareUploadPlanFromFlatFiles(savedFiles);
+
+        writeGalleryFileListById(currentGalleryId, currentData.folderName, persistedFiles);
+        currentFiles = persistedFiles.slice();
         pendingDeletedGalleryFileKeys = [];
         return true;
     }
@@ -10447,12 +12819,45 @@ function createShowFileListPanel() {
             });
         }
 
-        currentFiles.forEach(function(file, index) {
+        function renderFolderRow(folderItem, depth) {
+            var row = document.createElement('div');
+            row.setAttribute('data-folder-row', '1');
+            row.setAttribute('data-folder-path', folderItem.path);
+            row.style.cssText = 'display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-bottom: 1px solid rgba(92,13,18,0.15); background-color: rgb(233,229,216); user-select: none; -webkit-user-select: none;';
+
+            var indent = document.createElement('span');
+            indent.style.cssText = 'display: inline-block; width: ' + (depth * 18) + 'px; min-width: ' + (depth * 18) + 'px; flex-shrink: 0;';
+            row.appendChild(indent);
+
+            var toggle = document.createElement('a');
+            toggle.href = '#';
+            toggle.textContent = isShowFileListFolderExpanded(folderItem.path) ? '[-]' : '[+]';
+            toggle.style.cssText = 'font-size: 9pt; color: #5C0D12; font-weight: bold; text-decoration: none; flex-shrink: 0;';
+            toggle.addEventListener('click', function(e) {
+                e.preventDefault();
+                fileListFolderExpandState[folderItem.path] = !isShowFileListFolderExpanded(folderItem.path);
+                renderFileList();
+            });
+            row.appendChild(toggle);
+
+            var label = document.createElement('span');
+            label.textContent = folderItem.name + '/';
+            label.style.cssText = 'font-size: 9pt; color: #5C0D12; font-weight: bold; flex: 1; min-width: 0; word-break: break-all;';
+            row.appendChild(label);
+
+            listContainer.appendChild(row);
+        }
+
+        function renderFileRow(file, index, depth) {
             var row = document.createElement('div');
             row.setAttribute('data-file-row', '1');
             row.setAttribute('data-file-index', String(index));
             row.draggable = false;
             row.style.cssText = 'display: flex; align-items: center; gap: 6px; padding: 3px 8px; border-bottom: 1px solid rgba(92,13,18,0.15); background-color: rgb(227,224,209); cursor: default; transition: transform 0.16s ease, background-color 0.12s ease, opacity 0.12s ease, box-shadow 0.12s ease; user-select: none; -webkit-user-select: none;';
+
+            var indent = document.createElement('span');
+            indent.style.cssText = 'display: inline-block; width: ' + (depth * 18) + 'px; min-width: ' + (depth * 18) + 'px; flex-shrink: 0;';
+            row.appendChild(indent);
 
             var checkBox = document.createElement('input');
             checkBox.type = 'checkbox';
@@ -10680,7 +13085,23 @@ function createShowFileListPanel() {
             row.appendChild(delBtn);
 
             listContainer.appendChild(row);
-        });
+        }
+
+        function renderTreeItems(node, depth) {
+            node.items.forEach(function(item) {
+                if (item.type === 'folder') {
+                    renderFolderRow(item, depth);
+                    if (isShowFileListFolderExpanded(item.path)) {
+                        renderTreeItems(node.folders[item.name], depth + 1);
+                    }
+                    return;
+                }
+
+                renderFileRow(item.file, item.index, depth);
+            });
+        }
+
+        renderTreeItems(buildShowFileListTree(currentFiles), 0);
     }
 
     function renderFolderManager() {
@@ -11922,107 +14343,6 @@ function _enhancedInsertSettingControlLike(templateInput, options) {
     return clonedInput;
 }
 
-function _enhancedSettingsGetJapaneseAIGeneratedDefaultEnabled() {
-    var settings = Object.assign({}, getDefaultSettings(), loadSettings() || {});
-    return settings.japaneseDefaultAIGenerated !== false;
-}
-
-function _enhancedNormalizeNodeText(node) {
-    return String((node && node.textContent) || '').replace(/\s+/g, ' ').trim();
-}
-
-function _enhancedCheckboxText(input) {
-    if (!input) return '';
-    var parts = [];
-    var label = input.closest ? input.closest('label') : null;
-    if (label) parts.push(_enhancedNormalizeNodeText(label));
-    if (input.parentNode) parts.push(_enhancedNormalizeNodeText(input.parentNode));
-    if (input.nextElementSibling) parts.push(_enhancedNormalizeNodeText(input.nextElementSibling));
-    if (input.parentNode && input.parentNode.nextElementSibling) parts.push(_enhancedNormalizeNodeText(input.parentNode.nextElementSibling));
-    return parts.join(' | ');
-}
-
-function _enhancedFindAIGeneratedCheckbox(root) {
-    var list = Array.prototype.slice.call((root || document).querySelectorAll('input[type="checkbox"]') || []);
-    for (var i = 0; i < list.length; i++) {
-        var text = _enhancedCheckboxText(list[i]);
-        if (
-            text.indexOf('AI Generated/AI生成') !== -1 ||
-            text.indexOf('AI Generated') !== -1 ||
-            text.indexOf('AI生成') !== -1
-        ) {
-            return list[i];
-        }
-    }
-    return null;
-}
-
-function _enhancedContainerLooksJapanese(root) {
-    if (!root) return false;
-
-    var selects = Array.prototype.slice.call(root.querySelectorAll('select') || []);
-    for (var i = 0; i < selects.length; i++) {
-        var select = selects[i];
-        var opt = select.options && select.selectedIndex >= 0 ? select.options[select.selectedIndex] : null;
-        var text = String((opt && opt.textContent) || select.value || '').trim();
-        if (/^japanese$/i.test(text) || text.indexOf('日本語') !== -1) return true;
-    }
-
-    var checkedInputs = Array.prototype.slice.call(root.querySelectorAll('input:checked') || []);
-    for (var j = 0; j < checkedInputs.length; j++) {
-        var input = checkedInputs[j];
-        var mix = [
-            String(input.value || ''),
-            _enhancedCheckboxText(input)
-        ].join(' | ');
-        if (/^japanese$/i.test(String(input.value || '').trim()) || /(^|\W)Japanese(\W|$)/i.test(mix) || mix.indexOf('日本語') !== -1) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-function _enhancedSetChecked(input, checked) {
-    if (!input || input.checked === checked) return;
-    input.checked = checked;
-    try { input.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
-    try { input.dispatchEvent(new Event('change', { bubbles: true })); } catch (e2) {}
-}
-
-function _enhancedTryApplyJapaneseAIGeneratedDefault(target) {
-    if (!_enhancedSettingsGetJapaneseAIGeneratedDefaultEnabled()) return;
-    var root = target && target.closest ? (
-        target.closest('.s[data-custom="true"]') ||
-        target.closest('form') ||
-        target.closest('.s') ||
-        target.closest('section') ||
-        document
-    ) : document;
-
-    if (!root || !_enhancedContainerLooksJapanese(root)) return;
-
-    var aiCheckbox = _enhancedFindAIGeneratedCheckbox(root);
-    if (!aiCheckbox) return;
-
-    _enhancedSetChecked(aiCheckbox, true);
-}
-
-if (!window.__fifybujJapaneseAIGeneratedDefaultInstalled) {
-    window.__fifybujJapaneseAIGeneratedDefaultInstalled = true;
-
-    document.addEventListener('change', function(e) {
-        setTimeout(function() {
-            _enhancedTryApplyJapaneseAIGeneratedDefault(e.target || document);
-        }, 0);
-    }, true);
-
-    document.addEventListener('click', function(e) {
-        setTimeout(function() {
-            _enhancedTryApplyJapaneseAIGeneratedDefault(e.target || document);
-        }, 0);
-    }, true);
-}
 
 function _enhanceSettingPanelWithBackupUI(panel) {
     if (!panel || panel.__backupEnhanced) return panel;
@@ -12420,30 +14740,6 @@ function _enhanceSettingPanelWithBackupUI(panel) {
         });
     });
 
-    function persistSilently() {
-        saveSettings(_collectEnhancedSettingValues(panel));
-    }
-
-    var autosaveInputs = [
-        panel.__enhancedSettingRefs.retryInput,
-        interfaceInputs[0], interfaceInputs[1], interfaceInputs[2], panel.__enhancedSettingRefs.aiGeneratedDefaultInput, interfaceInputs[3], interfaceInputs[4],
-        interfaceInputs[5], interfaceInputs[6], interfaceInputs[7], interfaceInputs[8], interfaceInputs[9], interfaceInputs[10], interfaceInputs[11],
-        panel.__enhancedSettingRefs.galleryFolderManagerInputs[0],
-        dictInputs[0], dictInputs[1],
-        debugInputs[0], debugInputs[1]
-    ];
-
-    autosaveInputs.forEach(function(input) {
-        if (!input) return;
-        input.addEventListener('change', persistSilently);
-    });
-
-    if (priorityTable) {
-        priorityTable.addEventListener('click', function(e) {
-            if (!e.target || e.target.tagName !== 'BUTTON') return;
-            setTimeout(persistSilently, 0);
-        });
-    }
 
     var footerSaveBtn = contentFooter ? contentFooter.querySelector('button') : null;
     if (footerSaveBtn && footerSaveBtn.parentNode) {
@@ -15180,6 +17476,342 @@ function __createSettingPanelSidebar_legacy_v6(sectionDiv) {
     return container;
 }
 
+function createLocalFolderPanel() {
+    var panel = document.createElement('div');
+    panel.className = 'local-folder-container';
+    panel.style.cssText = 'display: none; padding: 10px; background-color: #E0DED3; border: 1px solid #5C0D12; position: relative;';
+
+    var titleDiv = document.createElement('div');
+    titleDiv.textContent = 'Local Folder Manager';
+    titleDiv.style.cssText = 'font-weight: bold; font-size: 10pt; color: #5C0D12; margin-bottom: 10px; border-bottom: 1px solid #5C0D12; padding-bottom: 4px;';
+    panel.appendChild(titleDiv);
+
+    var noteDiv = document.createElement('div');
+    noteDiv.style.cssText = 'font-size: 8.5pt; color: #5C0D12; margin-bottom: 6px; line-height: 1.5;';
+    noteDiv.textContent = '可以指定默認文件夾；新增圖庫時會先落到默認文件夾。默認文件夾不可刪除；若資料夾內仍有圖庫，也不可刪除。';
+    panel.appendChild(noteDiv);
+
+    var statusDiv = document.createElement('div');
+    statusDiv.style.cssText = 'display: none; font-size: 8.5pt; color: #5C0D12; margin-bottom: 6px;';
+    panel.appendChild(statusDiv);
+
+    function setStatus(message, isError) {
+        statusDiv.textContent = message || '';
+        statusDiv.style.display = message ? 'block' : 'none';
+        statusDiv.style.color = isError ? '#CC0000' : '#5C0D12';
+    }
+
+    function getFolderNameValidationError(folderName) {
+        var name = String(folderName || '').trim();
+        if (!name) return 'Folder name cannot be empty';
+        if (name === 'Unsorted') return 'Folder name cannot be Unsorted';
+        if (name.indexOf('local:') === 0) return 'Folder name cannot start with local:';
+        return '';
+    }
+
+    function getDeleteBlockedReasonText(reason) {
+        if (reason === 'DEFAULT_FOLDER') return 'Default';
+        if (reason === 'FOLDER_NOT_EMPTY') return 'In Use';
+        if (reason === 'MIN_FOLDER_COUNT') return 'Keep One';
+        return '';
+    }
+
+    function getRowUsageCount(rowData, usageMap) {
+        var originalName = String((rowData && rowData.originalName) || '').trim();
+        var currentName = String((rowData && rowData.name) || '').trim();
+
+        if (originalName && usageMap[originalName]) return usageMap[originalName];
+        return usageMap[currentName] || 0;
+    }
+
+    var tableWrap = document.createElement('div');
+    tableWrap.style.cssText = 'margin: 0; padding: 0;';
+
+    var table = document.createElement('table');
+    table.style.cssText = 'width: 100%; border-collapse: collapse; border-spacing: 0; table-layout: fixed; margin: 0;';
+    var thead = document.createElement('thead');
+    var headRow = document.createElement('tr');
+    var th1 = document.createElement('th'); th1.textContent = 'Folder Name'; th1.style.cssText = 'text-align: left; padding: 4px; font-size: 9pt; color: #5C0D12;';
+    var th2 = document.createElement('th'); th2.textContent = 'Display Order'; th2.style.cssText = 'width: 90px; text-align: center; padding: 4px; font-size: 9pt; color: #5C0D12;';
+    var th3 = document.createElement('th'); th3.textContent = 'Galleries'; th3.style.cssText = 'width: 80px; text-align: center; padding: 4px; font-size: 9pt; color: #5C0D12;';
+    var th4 = document.createElement('th'); th4.textContent = 'Default'; th4.style.cssText = 'width: 80px; text-align: center; padding: 4px; font-size: 9pt; color: #5C0D12;';
+    var th5 = document.createElement('th'); th5.style.cssText = 'width: 90px;';
+    headRow.appendChild(th1);
+    headRow.appendChild(th2);
+    headRow.appendChild(th3);
+    headRow.appendChild(th4);
+    headRow.appendChild(th5);
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    var tbody = document.createElement('tbody');
+    var defaultRadioGroupName = 'local_folder_default_group_' + Date.now();
+    var folderRows = [];
+    var defaultFolderName = '';
+
+    function renderRows() {
+        while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+
+        var persistedUsageMap = getRealtimeLocalFolderGalleryUsageMap();
+        var currentFolderNames = folderRows.map(function(rowData) {
+            return String((rowData && rowData.name) || '').trim() || String((rowData && rowData.originalName) || '').trim();
+        }).filter(function(folderName) {
+            return !!folderName;
+        });
+
+        var currentUsageMap = {};
+        folderRows.forEach(function(rowData) {
+            var currentName = String((rowData && rowData.name) || '').trim() || String((rowData && rowData.originalName) || '').trim();
+            if (!currentName) return;
+            currentUsageMap[currentName] = getRowUsageCount(rowData, persistedUsageMap);
+        });
+
+        folderRows.forEach(function(rowData, idx) {
+            var tr = document.createElement('tr');
+
+            var td1 = document.createElement('td');
+            td1.style.cssText = 'text-align: left; padding: 4px 15px 4px 4px;';
+            var nameInput = document.createElement('input');
+            nameInput.type = 'text';
+            nameInput.value = rowData.name;
+            nameInput.size = 40;
+            nameInput.style.cssText = 'width: 100%; box-sizing: border-box; border: 1px solid #5C0D12; background: #E0DED3; font-size: 9pt; padding: 2px 4px;';
+            nameInput.addEventListener('input', function() {
+                var previousName = rowData.name;
+                rowData.name = nameInput.value;
+                if (String(defaultFolderName || '').trim() === String(previousName || '').trim()) {
+                    defaultFolderName = String(rowData.name || '').trim() || String(rowData.originalName || '').trim() || defaultFolderName;
+                }
+            });
+            td1.appendChild(nameInput);
+
+            var td2 = document.createElement('td');
+            td2.style.cssText = 'text-align: center; padding: 4px;';
+            var orderSelect = document.createElement('select');
+            orderSelect.style.cssText = 'width: 80px; font-size: 8pt; border: 1px solid #5C0D12; background: #E0DED3;';
+            for (var i = 1; i <= folderRows.length; i++) {
+                var opt = document.createElement('option');
+                opt.value = String(i);
+                opt.textContent = String(i);
+                if (i === idx + 1) opt.selected = true;
+                orderSelect.appendChild(opt);
+            }
+            orderSelect.addEventListener('change', function() {
+                var newIdx = parseInt(orderSelect.value, 10) - 1;
+                var moved = folderRows.splice(idx, 1)[0];
+                folderRows.splice(newIdx, 0, moved);
+                renderRows();
+                setStatus('尚未保存本地文件夾變更', false);
+            });
+            td2.appendChild(orderSelect);
+
+            var td3 = document.createElement('td');
+            td3.style.cssText = 'text-align: center; padding: 4px; font-size: 9pt; color: #333;';
+            td3.textContent = String(getRowUsageCount(rowData, persistedUsageMap));
+
+            var td4 = document.createElement('td');
+            td4.style.cssText = 'text-align: center; padding: 4px;';
+            var defaultRadio = document.createElement('input');
+            defaultRadio.type = 'radio';
+            defaultRadio.name = defaultRadioGroupName;
+            defaultRadio.checked = String(defaultFolderName || '').trim() === (String(rowData.name || '').trim() || String(rowData.originalName || '').trim());
+            defaultRadio.style.cssText = 'margin: 0; accent-color: #5C0D12;';
+            defaultRadio.addEventListener('change', function() {
+                if (!defaultRadio.checked) return;
+                defaultFolderName = String(rowData.name || '').trim() || String(rowData.originalName || '').trim() || defaultFolderName;
+                setStatus('尚未保存默認文件夾變更', false);
+            });
+            td4.appendChild(defaultRadio);
+
+            var td5 = document.createElement('td');
+            td5.style.cssText = 'padding: 4px; text-align: center;';
+            var rowName = String(rowData.name || '').trim() || String(rowData.originalName || '').trim();
+            var deleteState = canDeleteLocalFolderName(rowName, currentFolderNames, defaultFolderName, currentUsageMap);
+
+            if (deleteState.ok) {
+                var delLink = document.createElement('a');
+                delLink.href = '#';
+                delLink.textContent = '[Delete]';
+                delLink.style.cssText = 'font-size: 9pt; color: #5C0D12;';
+                delLink.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    folderRows.splice(idx, 1);
+                    renderRows();
+                    setStatus('尚未保存本地文件夾變更', false);
+                });
+                td5.appendChild(delLink);
+            } else {
+                var blockedSpan = document.createElement('span');
+                blockedSpan.textContent = getDeleteBlockedReasonText(deleteState.reason);
+                blockedSpan.style.cssText = 'font-size: 8.5pt; color: #888;';
+                td5.appendChild(blockedSpan);
+            }
+
+            tr.appendChild(td1);
+            tr.appendChild(td2);
+            tr.appendChild(td3);
+            tr.appendChild(td4);
+            tr.appendChild(td5);
+            tbody.appendChild(tr);
+        });
+    }
+
+    table.appendChild(tbody);
+    tableWrap.appendChild(table);
+    panel.appendChild(tableWrap);
+
+    var bottomRow = document.createElement('div');
+    bottomRow.style.cssText = 'display: flex; gap: 8px; margin-top: 8px; align-items: center;';
+
+    var newFolderInput = document.createElement('input');
+    newFolderInput.type = 'text';
+    newFolderInput.placeholder = 'New folder name';
+    newFolderInput.size = 40;
+    newFolderInput.style.cssText = 'border: 1px solid #5C0D12; background: #E0DED3; font-size: 9pt; padding: 2px 4px;';
+
+    var createBtn = document.createElement('button');
+    createBtn.textContent = 'Create Folder';
+    applyPageToneBtnStyle(createBtn, 'padding: 2px 12px;height: 24px;');
+
+    createBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+
+        var name = String(newFolderInput.value || '').trim();
+        var validationError = getFolderNameValidationError(name);
+        if (validationError) {
+            setStatus(validationError, true);
+            return;
+        }
+
+        var exists = folderRows.some(function(rowData) {
+            return String((rowData && rowData.name) || '').trim() === name;
+        });
+        if (exists) {
+            setStatus('Folder already exists', true);
+            return;
+        }
+
+        folderRows.push({
+            originalName: name,
+            name: name
+        });
+        newFolderInput.value = '';
+        renderRows();
+        setStatus('尚未保存本地文件夾變更', false);
+    });
+
+    var spacer = document.createElement('div');
+    spacer.style.cssText = 'flex: 1;';
+
+    var saveBtn = document.createElement('button');
+    saveBtn.textContent = 'Save Changes';
+    applyPrimaryDarkBtnStyle(saveBtn, 'padding: 4px 16px;border: none;');
+
+    saveBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+
+        var nextFolderNames = [];
+        var seen = {};
+        var renameMap = {};
+        var nextDefaultFolder = String(defaultFolderName || '').trim();
+
+        for (var i = 0; i < folderRows.length; i++) {
+            var rowData = folderRows[i];
+            var nextFolderName = String((rowData && rowData.name) || '').trim();
+            var originalFolderName = String((rowData && rowData.originalName) || '').trim();
+
+            var validationError = getFolderNameValidationError(nextFolderName);
+            if (validationError) {
+                setStatus(validationError, true);
+                return;
+            }
+
+            if (seen[nextFolderName]) {
+                setStatus('Folder name duplicated: ' + nextFolderName, true);
+                return;
+            }
+            seen[nextFolderName] = true;
+            nextFolderNames.push(nextFolderName);
+
+            if (originalFolderName && originalFolderName !== nextFolderName) {
+                renameMap[originalFolderName] = nextFolderName;
+            }
+
+            if (String(defaultFolderName || '').trim() === originalFolderName) {
+                nextDefaultFolder = nextFolderName;
+            }
+        }
+
+        if (!nextFolderNames.length) {
+            setStatus('At least one folder is required', true);
+            return;
+        }
+
+        if (!nextDefaultFolder || nextFolderNames.indexOf(nextDefaultFolder) === -1) {
+            nextDefaultFolder = nextFolderNames[0];
+        }
+
+        var openSection = document.querySelector('.s[data-custom="true"]');
+        if (openSection && typeof openSection.__applyLocalFolderRenameMap === 'function' && Object.keys(renameMap).length > 0) {
+            openSection.__applyLocalFolderRenameMap(renameMap, nextDefaultFolder);
+        }
+
+        nextDefaultFolder = setDefaultLocalFolderName(nextDefaultFolder, nextFolderNames);
+        saveLocalFolders(nextFolderNames, nextDefaultFolder);
+
+        var renamedGalleryCount = renameSavedGalleryLocalFolders(renameMap);
+
+        folderRows = nextFolderNames.map(function(folderName) {
+            return {
+                originalName: folderName,
+                name: folderName
+            };
+        });
+        defaultFolderName = nextDefaultFolder;
+
+        renderRows();
+        setStatus('已保存，默認文件夾：' + defaultFolderName, false);
+
+        if (renamedGalleryCount > 0) {
+            opLog('更新本地圖庫文件夾引用', {
+                renamedGalleryCount: renamedGalleryCount,
+                renameMap: renameMap
+            });
+        }
+
+        opLog('保存本地文件夾管理', {
+            folders: nextFolderNames,
+            defaultFolder: defaultFolderName
+        });
+
+        flashButtonSavedState(saveBtn, '已保存 ✓', 'Save Changes', 1500);
+    });
+
+    bottomRow.appendChild(newFolderInput);
+    bottomRow.appendChild(createBtn);
+    bottomRow.appendChild(spacer);
+    bottomRow.appendChild(saveBtn);
+    panel.appendChild(bottomRow);
+
+    function rebuildFromStorage() {
+        folderRows = getLocalFolders().map(function(folderName) {
+            return {
+                originalName: folderName,
+                name: folderName
+            };
+        });
+        defaultFolderName = getDefaultLocalFolderName();
+        renderRows();
+        setStatus('', false);
+    }
+
+    panel.refreshPanel = rebuildFromStorage;
+    panel.addEventListener('show', rebuildFromStorage);
+    rebuildFromStorage();
+
+    return panel;
+}
+
 function createUnpublishedSection(btnRef) {
     if (document.querySelector('.s[data-custom="true"]')) return;
 
@@ -15198,7 +17830,7 @@ function createUnpublishedSection(btnRef) {
 
     var headerDiv = document.createElement('div'); headerDiv.className = 'h';
     var leftDiv = document.createElement('div'); leftDiv.className = 'l'; leftDiv.textContent = 'Auto Create & Upload'; leftDiv.style.fontWeight = 'bold';
-    var rightDiv = document.createElement('div'); rightDiv.className = 'r'; rightDiv.innerHTML = '[<a href="#" class="close-custom-section">Close</a>]';
+    var rightDiv = document.createElement('div'); rightDiv.className = 'r'; rightDiv.innerHTML = '[<a href="#" class="close-custom-section">Collapse Open Folders</a>]';
     var clearDiv = document.createElement('div'); clearDiv.className = 'c';
     headerDiv.appendChild(leftDiv); headerDiv.appendChild(rightDiv); headerDiv.appendChild(clearDiv);
     sectionDiv.appendChild(headerDiv);
@@ -15242,7 +17874,21 @@ function createUnpublishedSection(btnRef) {
         e.preventDefault();
         getCheckedGalleryGroupsFromTbody(tbody).forEach(function(group) {
             var fields = getGalleryGroupFields(group);
-            if (!fields || !fields.folderSelect) return;
+            if (!fields) return;
+
+            if (isLocalFolderOptionValue(toolFolderSelect.value)) {
+                var nextLocalFolder = extractLocalFolderNameFromValue(toolFolderSelect.value) || getDefaultLocalFolderName();
+
+                if (fields.tr2) fields.tr2.dataset.localFolder = nextLocalFolder;
+                if (fields.localFolderSelect) fields.localFolderSelect.value = nextLocalFolder;
+
+                if (sectionDiv && typeof sectionDiv.__moveGalleryGroupToLocalFolder === 'function') {
+                    sectionDiv.__moveGalleryGroupToLocalFolder(group, nextLocalFolder);
+                }
+                return;
+            }
+
+            if (!fields.folderSelect) return;
             setGalleryGroupSelectValue(fields.folderSelect, toolFolderSelect.value);
         });
     });
@@ -15315,8 +17961,16 @@ function createUnpublishedSection(btnRef) {
         var newGroup = createGalleryGroup(waitingCreateCountRef.value, null, tbody, folderRow1, sectionDiv, waitingCreateCountRef);
         tbody.appendChild(newGroup);
         waitingCreateCountRef.value++;
-        var folderStrong1 = folderRow1.querySelector('strong');
-        if (folderStrong1) folderStrong1.textContent = waitingCreateCountRef.value;
+
+        var appendedTr2 = tbody.lastElementChild;
+        var appendedTr1 = appendedTr2 ? appendedTr2.previousElementSibling : null;
+        if (appendedTr1 && appendedTr2 && typeof sectionDiv.__moveGalleryGroupToLocalFolder === 'function') {
+            var appendedFields = getGalleryGroupFields([appendedTr1, appendedTr2]);
+            sectionDiv.__moveGalleryGroupToLocalFolder([appendedTr1, appendedTr2], getGalleryFieldsLocalFolderName(appendedFields));
+        } else if (typeof sectionDiv.__updateLocalFolderGroupCounts === 'function') {
+            sectionDiv.__updateLocalFolderGroupCounts();
+        }
+
         requestAnimationFrame(function() { fixAllGroups(sectionDiv, folderRow1); });
         opLog('新增空白圖庫列', { count: waitingCreateCountRef.value });
     });
@@ -15482,6 +18136,7 @@ function createUnpublishedSection(btnRef) {
 
     var analyzeBtn = document.createElement('a'); analyzeBtn.href = '#'; analyzeBtn.innerHTML = '[Analyze Mode]'; analyzeBtn.style.cssText = 'font-weight: bold; color: #5C0D12; margin-left: 5px; cursor: pointer; background-color: #E0DED3;';
     var settingBtn = document.createElement('a'); settingBtn.href = '#'; settingBtn.innerHTML = '[Setting]'; settingBtn.style.cssText = 'font-weight: bold; color: #5C0D12; margin-left: 15px; cursor: pointer; background-color: #E0DED3;';
+    var localFolderBtn = document.createElement('a'); localFolderBtn.href = '#'; localFolderBtn.innerHTML = '[Local Folder]'; localFolderBtn.style.cssText = 'font-weight: bold; color: #5C0D12; margin-left: 15px; cursor: pointer; background-color: #E0DED3;';
     var commentTemplateBtn = document.createElement('a'); commentTemplateBtn.href = '#'; commentTemplateBtn.innerHTML = '[Comment Template]'; commentTemplateBtn.style.cssText = 'font-weight: bold; color: #5C0D12; margin-left: 15px; cursor: pointer; background-color: #E0DED3;';
     var dictManagerBtn = document.createElement('a'); dictManagerBtn.href = '#'; dictManagerBtn.innerHTML = '[Dict Manager]'; dictManagerBtn.style.cssText = 'font-weight: bold; color: #5C0D12; margin-left: 15px; cursor: pointer; background-color: #E0DED3;';
     var showFileListBtn = document.createElement('a'); showFileListBtn.href = '#'; showFileListBtn.innerHTML = '[Gallery Folder Manager]'; showFileListBtn.style.cssText = 'font-weight: bold; color: #5C0D12; margin-left: 15px; cursor: pointer; background-color: #E0DED3;';
@@ -15491,6 +18146,7 @@ function createUnpublishedSection(btnRef) {
     buttonRow.appendChild(showFileListBtn);
     buttonRow.appendChild(commentTemplateBtn);
     buttonRow.appendChild(dictManagerBtn);
+    buttonRow.appendChild(localFolderBtn);
     buttonRow.appendChild(settingBtn);
     buttonRow.appendChild(consoleBtn);
     sectionDiv.appendChild(buttonRow);
@@ -15618,7 +18274,21 @@ function createUnpublishedSection(btnRef) {
         });
     }
 
-    function handleAnalyzeFiles(files) {
+    function handleAnalyzeFiles(selectionOrFiles) {
+        var selection = null;
+        var files = [];
+
+        if (selectionOrFiles && Array.isArray(selectionOrFiles.files)) {
+            selection = selectionOrFiles;
+            files = selectionOrFiles.files.slice();
+        } else {
+            files = Array.isArray(selectionOrFiles) ? selectionOrFiles.slice() : [];
+        }
+
+        var archiveSourceEntriesByGroup = selection
+            ? buildArchiveSourceEntriesByGroupFromAuthorizedSelection(selection)
+            : {};
+
         analyzeStatusBtn.textContent = '讀取中...';
         analyzeStatusBtn.style.color = '#5C0D12';
         handleArchiveFiles(files, null, function(results) {
@@ -15628,7 +18298,15 @@ function createUnpublishedSection(btnRef) {
                 setTimeout(function() { analyzeStatusBtn.textContent = ''; }, 2000);
                 return;
             }
-            results.forEach(function(r) { analyzeEntries.push(r); });
+            results.forEach(function(r) {
+                var groupKey = String((r && r.title) || '').trim();
+                if (groupKey && archiveSourceEntriesByGroup[groupKey]) {
+                    r.archiveSourceFiles = normalizeArchiveSourceFileEntries(archiveSourceEntriesByGroup[groupKey]);
+                } else {
+                    r.archiveSourceFiles = normalizeArchiveSourceFileEntries(r.archiveSourceFiles || []);
+                }
+                analyzeEntries.push(r);
+            });
             analyzeStatusBtn.textContent = '讀取完成，共 ' + analyzeEntries.length + ' 個項目';
             setTimeout(function() { analyzeStatusBtn.textContent = ''; }, 2000);
             renderAnalyzeResults();
@@ -15675,13 +18353,13 @@ function createUnpublishedSection(btnRef) {
                 imageFiles.sort(function(a, b) { return naturalCompare(a.path, b.path); });
                 if (imageFiles.length > MAX_FILES) { imageFiles = imageFiles.slice(0, MAX_FILES); }
                 var folderSourceLabel = relativeRootPath || dirHandle.name;
-                var storedFiles = createGallerySourcePrefixedFileEntries(imageFiles, relativeRootPath);
+                var preciseImageFiles = createPreciseFolderSourceFileEntries(imageFiles, relativeRootPath);
                 var entry = {
                     title: dirHandle.name,
                     folderName: relativeRootPath || '',
                     sourceLabel: folderSourceLabel,
                     authorizedRootId: authorizedRootEntry ? authorizedRootEntry.id : null,
-                    files: storedFiles,
+                    files: preciseImageFiles,
                     skipped: skipped
                 };
                 analyzeEntries.push(entry);
@@ -15714,7 +18392,7 @@ function createUnpublishedSection(btnRef) {
         analyzeStatusBtn.style.color = '#5C0D12';
 
         selectAuthorizedArchiveFilesWithPicker().then(function(selection) {
-            handleAnalyzeFiles(selection.files || []);
+            handleAnalyzeFiles(selection);
         }).catch(function(err) {
             if (err && err.name === 'AbortError') {
                 analyzeStatusBtn.textContent = '';
@@ -15761,7 +18439,7 @@ function createUnpublishedSection(btnRef) {
                 folder: 'Unsorted',
                 options: {
                     official: true, translated: false, rewrite: false,
-                    digital: false, decensored: false, aiGenerated: false,
+                    digital: false, decensored: false, aiGenerated: getCurrentSettingsSafe().japaneseDefaultAIGenerated !== false,
                     colorized: false, textless: false, incomplete: false,
                     sample: false, anthology: false, ongoing: false
                 },
@@ -15791,7 +18469,8 @@ function createUnpublishedSection(btnRef) {
                         'archive',
                         archiveRootName,
                         [{ name: archiveRootName, type: 'archive' }],
-                        null
+                        null,
+                        entry.archiveSourceFiles || []
                     );
                 }
             }
@@ -15805,8 +18484,8 @@ function createUnpublishedSection(btnRef) {
 
         var customSection = document.querySelector('.s[data-custom="true"]');
         if (customSection) {
-            var tbodyLocal = customSection.querySelector('tbody');
-            var folderRowLocal = customSection.querySelector('tr.gtr');
+            var tbodyLocal = customSection.__galleryGroupsTbody || customSection.querySelector('table.mt tbody');
+            var folderRowLocal = tbodyLocal ? tbodyLocal.querySelector('tr.gtr') : null;
             var folderRightLocal = folderRowLocal ? folderRowLocal.querySelector('td.r') : null;
             if (tbodyLocal && folderRowLocal && folderRightLocal) {
                 var waitingRef = { value: parseInt((folderRowLocal.querySelector('strong') || {}).textContent || '0', 10) };
@@ -15814,10 +18493,24 @@ function createUnpublishedSection(btnRef) {
                     var savedData = existingGalleries[existingGalleries.length - analyzeEntries.length + idx];
                     var newGroup = createGalleryGroup(waitingRef.value, savedData, tbodyLocal, folderRowLocal, customSection, waitingRef);
                     tbodyLocal.appendChild(newGroup);
+
+                    var appendedTr2 = tbodyLocal.lastElementChild;
+                    var appendedTr1 = appendedTr2 ? appendedTr2.previousElementSibling : null;
+                    if (appendedTr1 && appendedTr2 && typeof customSection.__moveGalleryGroupToLocalFolder === 'function') {
+                        var appendedFields = getGalleryGroupFields([appendedTr1, appendedTr2]);
+                        customSection.__moveGalleryGroupToLocalFolder([appendedTr1, appendedTr2], getGalleryFieldsLocalFolderName(appendedFields));
+                    }
+
                     waitingRef.value++;
                 });
-                var folderStrong = folderRowLocal.querySelector('strong');
-                if (folderStrong) folderStrong.textContent = waitingRef.value;
+
+                if (typeof customSection.__updateLocalFolderGroupCounts === 'function') {
+                    customSection.__updateLocalFolderGroupCounts();
+                } else {
+                    var folderStrong = folderRowLocal.querySelector('strong');
+                    if (folderStrong) folderStrong.textContent = waitingRef.value;
+                }
+
                 requestAnimationFrame(function() { fixAllGroups(customSection, folderRowLocal); });
             }
         }
@@ -15831,6 +18524,9 @@ function createUnpublishedSection(btnRef) {
     inputContainer.appendChild(analyzeResultsDiv);
     inputContainer.appendChild(analyzeBottomRow);
     sectionDiv.appendChild(inputContainer);
+
+    var localFolderPanel = createLocalFolderPanel();
+    sectionDiv.appendChild(localFolderPanel);
 
     var settingPanel = createSettingPanel(sectionDiv);
     sectionDiv.appendChild(settingPanel);
@@ -15850,6 +18546,7 @@ function createUnpublishedSection(btnRef) {
     var allPanels = [
         { btn: analyzeBtn, panel: inputContainer },
         { btn: settingBtn, panel: settingPanel },
+        { btn: localFolderBtn, panel: localFolderPanel },
         { btn: commentTemplateBtn, panel: commentTemplatePanel },
         { btn: dictManagerBtn, panel: dictManagerPanel },
         { btn: showFileListBtn, panel: showFileListPanel },
@@ -15867,6 +18564,7 @@ function createUnpublishedSection(btnRef) {
 
     analyzeBtn.addEventListener('click', function(e) { e.preventDefault(); togglePanel(inputContainer); });
     settingBtn.addEventListener('click', function(e) { e.preventDefault(); togglePanel(settingPanel); });
+    localFolderBtn.addEventListener('click', function(e) { e.preventDefault(); togglePanel(localFolderPanel); });
     commentTemplateBtn.addEventListener('click', function(e) { e.preventDefault(); togglePanel(commentTemplatePanel); });
     dictManagerBtn.addEventListener('click', function(e) { e.preventDefault(); togglePanel(dictManagerPanel); });
     showFileListBtn.addEventListener('click', function(e) { e.preventDefault(); togglePanel(showFileListPanel); });
@@ -15874,46 +18572,313 @@ function createUnpublishedSection(btnRef) {
 
     var contentTable = document.createElement('table');
     contentTable.className = 'mt';
-    contentTable.style.cssText = 'width: 100% !important; table-layout: fixed !important; background-color: #E0DED3 !important; border-collapse: collapse !important;';
+    contentTable.style.cssText = 'table-layout: fixed !important; width: 100% !important; background-color: #E0DED3 !important; border-collapse: collapse !important;';
 
     var thead = document.createElement('thead');
     var headerRow = document.createElement('tr');
-    var th1 = document.createElement('th'); th1.className = 'h1'; th1.style.cssText = 'text-align: left !important; padding-left: 4px !important;'; th1.textContent = 'Gallery Name';
-    var th2 = document.createElement('th'); th2.className = 'h3'; th2.style.cssText = 'text-align: right !important; width: 50px !important; padding-right: 10px !important;'; th2.textContent = 'Files';
+    var th1 = document.createElement('th'); th1.className = 'h1'; th1.style.cssText = 'text-align: left !important; width: 495px !important; min-width: 495px !important; max-width: 495px !important; padding-left: 4px !important;'; th1.textContent = 'Gallery Name';
+    var th2 = document.createElement('th'); th2.className = 'h3'; th2.style.cssText = 'text-align: right !important; width: 30px !important; min-width: 30px !important; max-width: 30px !important; padding-right: 4px !important;'; th2.textContent = 'Files';
     var th3 = document.createElement('th'); th3.className = 'h4'; th3.style.cssText = 'text-align: left !important; width: 100px !important;'; th3.textContent = 'Public Category';
     var th4 = document.createElement('th'); th4.className = 'h4'; th4.style.cssText = 'text-align: left !important; width: 140px !important; white-space: nowrap !important;'; th4.textContent = 'Gallery Language';
     var th5 = document.createElement('th'); th5.className = 'h4'; th5.style.cssText = 'text-align: left !important; width: auto !important; min-width: 155px !important; white-space: nowrap !important;'; th5.textContent = 'Gallery Folder';
-    var th6 = document.createElement('th'); th6.className = 'h6'; th6.style.cssText = 'text-align: right !important; width: 40px !important; padding-right: 1px !important;'; th6.innerHTML = '&nbsp;';
+    var th6 = document.createElement('th'); th6.className = 'h6'; th6.style.cssText = 'text-align: right !important; width: 32px !important; padding-right: 0 !important;'; th6.innerHTML = '&nbsp;';
     headerRow.appendChild(th1); headerRow.appendChild(th2); headerRow.appendChild(th3); headerRow.appendChild(th4); headerRow.appendChild(th5); headerRow.appendChild(th6);
     thead.appendChild(headerRow); contentTable.appendChild(thead);
 
     var tbody = document.createElement('tbody');
+    sectionDiv.__galleryGroupsTbody = tbody;
 
-    var folderRow1 = document.createElement('tr'); folderRow1.className = 'gtr'; folderRow1.id = 'frow_custom_1';
-    var folderLeft1 = document.createElement('td'); folderLeft1.colSpan = 4; folderLeft1.className = 'l';
-    folderLeft1.innerHTML = '<a id="ft_custom_1" class="folder-toggle" href="#" data-folder="1">[-]</a>&nbsp; <strong>0</strong>&nbsp; <span>Waiting Create</span>';
-    folderRow1.appendChild(folderLeft1);
-    var folderRight1 = document.createElement('td'); folderRight1.colSpan = 2; folderRight1.className = 'r';
-    folderRight1.style.cssText = 'text-align: right !important; padding-right: 1px !important;';
-    folderRight1.innerHTML = '<span class="select-all" data-folder="1">+ All</span> <span class="deselect-all" data-folder="1">- All</span>';
-    folderRow1.appendChild(folderRight1);
-    tbody.appendChild(folderRow1);
+    var folderRow1 = null;
+    var folderRight1 = null;
 
-    var toggle1 = folderRow1.querySelector('.folder-toggle');
-    toggle1.addEventListener('click', function(e) {
-        e.preventDefault();
-        var isExpanded = this.textContent === '[-]';
-        var nextRow = folderRow1.nextElementSibling;
-        while (nextRow) {
-            if (!nextRow.classList.contains('gtr')) {
-                nextRow.style.display = isExpanded ? 'none' : 'table-row';
-            }
+    function setFolderGroupExpanded(row, expanded) {
+        if (!row) return;
+
+        var normalizedExpanded = expanded !== false;
+        var folderName = String(row.dataset.localFolderName || '').trim();
+
+        var nextRow = row.nextElementSibling;
+        while (nextRow && !nextRow.classList.contains('gtr')) {
+            nextRow.style.display = normalizedExpanded ? 'table-row' : 'none';
             nextRow = nextRow.nextElementSibling;
         }
-        this.textContent = isExpanded ? '[+]' : '[-]';
-        var spans = folderRight1.querySelectorAll('span');
-        spans.forEach(function(span) { span.style.display = isExpanded ? 'none' : ''; });
-    });
+
+        if (row.__folderToggle) row.__folderToggle.textContent = normalizedExpanded ? '[-]' : '[+]';
+        if (row.__folderActions) {
+            row.__folderActions.forEach(function(span) {
+                span.style.display = normalizedExpanded ? '' : 'none';
+            });
+        }
+
+        if (folderName) setStoredLocalFolderExpandState(folderName, normalizedExpanded);
+    }
+
+    function createLocalFolderGroupRow(folderName, rowIndex) {
+        var row = document.createElement('tr');
+        row.className = 'gtr';
+        row.id = rowIndex === 0 ? 'frow_custom_1' : ('frow_custom_local_' + rowIndex);
+        row.dataset.localFolderName = folderName;
+
+        var leftCell = document.createElement('td');
+        leftCell.colSpan = 4;
+        leftCell.className = 'l';
+
+        var toggle = document.createElement('a');
+        toggle.href = '#';
+        toggle.className = 'folder-toggle';
+        toggle.textContent = '[-]';
+
+        var countStrong = document.createElement('strong');
+        countStrong.textContent = '0';
+
+        var labelSpan = document.createElement('span');
+        labelSpan.textContent = folderName;
+
+        leftCell.appendChild(toggle);
+        leftCell.appendChild(document.createTextNode(' '));
+        leftCell.appendChild(countStrong);
+        leftCell.appendChild(document.createTextNode(' '));
+        leftCell.appendChild(labelSpan);
+        row.appendChild(leftCell);
+
+        var rightCell = document.createElement('td');
+        rightCell.colSpan = 2;
+        rightCell.className = 'r';
+        rightCell.style.cssText = 'text-align: right !important; padding-right: 1px !important;';
+
+        var selectAllSpan = document.createElement('span');
+        selectAllSpan.className = 'select-all';
+        selectAllSpan.textContent = '+ All';
+
+        var deselectAllSpan = document.createElement('span');
+        deselectAllSpan.className = 'deselect-all';
+        deselectAllSpan.textContent = '- All';
+        deselectAllSpan.style.marginLeft = '6px';
+
+        rightCell.appendChild(selectAllSpan);
+        rightCell.appendChild(document.createTextNode(' '));
+        rightCell.appendChild(deselectAllSpan);
+        row.appendChild(rightCell);
+
+        row.__folderToggle = toggle;
+        row.__folderCount = countStrong;
+        row.__folderLabel = labelSpan;
+        row.__folderActions = [selectAllSpan, deselectAllSpan];
+        row.__folderRight = rightCell;
+
+        toggle.addEventListener('click', function(e) {
+            e.preventDefault();
+            setFolderGroupExpanded(row, toggle.textContent === '[+]');
+        });
+
+        return row;
+    }
+
+    function populateFolderSelectOptions(selectEl, selectedValue) {
+        if (!selectEl) return;
+
+        var nextSelectedValue = String(selectedValue || '').trim();
+        while (selectEl.options.length > 0) selectEl.remove(0);
+
+        var defaultOption = document.createElement('option');
+        defaultOption.value = 'Unsorted';
+        defaultOption.textContent = 'Unsorted';
+        selectEl.appendChild(defaultOption);
+
+        var folders = getStoredFolders();
+        folders.forEach(function(folder) {
+            var option = document.createElement('option');
+            option.value = folder;
+            option.textContent = folder;
+            selectEl.appendChild(option);
+        });
+
+        var separator = document.createElement('option');
+        separator.value = '';
+        separator.textContent = '-----Local Folder-----';
+        separator.disabled = true;
+        separator.style.cssText = 'font-weight: bold; color: #5C0D12;';
+        selectEl.appendChild(separator);
+
+        var localFolders = getLocalFolders();
+        localFolders.forEach(function(folder) {
+            var option = document.createElement('option');
+            option.value = 'local:' + folder;
+            option.textContent = folder;
+            selectEl.appendChild(option);
+        });
+
+        if (!nextSelectedValue) nextSelectedValue = 'local:' + getDefaultLocalFolderName();
+
+        var hasMatch = Array.prototype.some.call(selectEl.options, function(opt) {
+            return opt.value === nextSelectedValue;
+        });
+
+        if (!hasMatch) {
+            nextSelectedValue = isLocalFolderOptionValue(nextSelectedValue)
+                ? ('local:' + getDefaultLocalFolderName())
+                : 'Unsorted';
+        }
+
+        selectEl.value = nextSelectedValue;
+    }
+
+    sectionDiv.__applyLocalFolderRenameMap = function(renameMap, nextDefaultFolder) {
+        renameMap = renameMap || {};
+
+        getGalleryGroupsFromTbody(tbody).forEach(function(group) {
+            var fields = getGalleryGroupFields(group);
+            if (!fields || !fields.tr2) return;
+
+            var currentLocalFolder = String(fields.tr2.dataset.localFolder || '').trim();
+            if (renameMap[currentLocalFolder]) {
+                fields.tr2.dataset.localFolder = renameMap[currentLocalFolder];
+            }
+
+            if (fields.localFolderSelect) {
+                var selectedLocalFolder = String(fields.localFolderSelect.value || '').trim();
+                if (renameMap[selectedLocalFolder]) {
+                    fields.localFolderSelect.value = renameMap[selectedLocalFolder];
+                } else if (nextDefaultFolder && !Array.prototype.some.call(fields.localFolderSelect.options, function(opt) { return opt.value === selectedLocalFolder; })) {
+                    fields.localFolderSelect.value = nextDefaultFolder;
+                }
+            }
+
+            if (fields.folderSelect && isLocalFolderOptionValue(fields.folderSelect.value)) {
+                var selectedUploadLocalFolder = extractLocalFolderNameFromValue(fields.folderSelect.value);
+                if (renameMap[selectedUploadLocalFolder]) {
+                    fields.folderSelect.value = 'local:' + renameMap[selectedUploadLocalFolder];
+                } else if (nextDefaultFolder) {
+                    fields.folderSelect.value = 'local:' + nextDefaultFolder;
+                }
+            }
+        });
+
+        if (toolFolderSelect && isLocalFolderOptionValue(toolFolderSelect.value)) {
+            var toolSelectedLocalFolder = extractLocalFolderNameFromValue(toolFolderSelect.value);
+            if (renameMap[toolSelectedLocalFolder]) {
+                toolFolderSelect.value = 'local:' + renameMap[toolSelectedLocalFolder];
+            } else if (nextDefaultFolder) {
+                toolFolderSelect.value = 'local:' + nextDefaultFolder;
+            }
+        }
+    };
+
+    sectionDiv.__syncLocalFolderSelectOptions = function() {
+        var toolSelectedValue = toolFolderSelect ? toolFolderSelect.value : '';
+        populateFolderSelectOptions(toolFolderSelect, toolSelectedValue);
+
+        getGalleryGroupsFromTbody(tbody).forEach(function(group) {
+            var fields = getGalleryGroupFields(group);
+            if (!fields || !fields.tr2) return;
+
+            var localFolderName = String(fields.tr2.dataset.localFolder || '').trim() || getDefaultLocalFolderName();
+            var uploadFolderName = String(fields.tr2.dataset.uploadFolder || '').trim() || 'Unsorted';
+            var currentSelectedValue = String((fields.folderSelect && fields.folderSelect.value) || '').trim();
+            var nextUploadFolderValue = isLocalFolderOptionValue(currentSelectedValue)
+                ? uploadFolderName
+                : (currentSelectedValue || uploadFolderName || 'Unsorted');
+
+            populateUploadFolderSelectOptions(fields.folderSelect, nextUploadFolderValue);
+            populateLocalFolderSelectOptions(fields.localFolderSelect, localFolderName);
+            syncGalleryFolderStateForFields(fields);
+        });
+    };
+
+    sectionDiv.__updateLocalFolderGroupCounts = function() {
+        Array.prototype.slice.call(tbody.querySelectorAll('tr.gtr')).forEach(function(groupRow) {
+            var count = 0;
+            var nextRow = groupRow.nextElementSibling;
+            while (nextRow && !nextRow.classList.contains('gtr')) {
+                if (nextRow.querySelector && nextRow.querySelector('td.gtc6 input[type="checkbox"]')) count++;
+                nextRow = nextRow.nextElementSibling;
+            }
+            if (groupRow.__folderCount) groupRow.__folderCount.textContent = String(count);
+        });
+
+        waitingCreateCountRef.value = getGalleryGroupsFromTbody(tbody).length;
+        refreshOpenLocalFolderPanelIfOpen();
+    };
+
+    sectionDiv.__moveGalleryGroupToLocalFolder = function(group, folderName) {
+        if (!group || group.length !== 2) return;
+
+        var normalizedFolderName = String(folderName || '').trim() || getDefaultLocalFolderName();
+        var targetRow = Array.prototype.slice.call(tbody.querySelectorAll('tr.gtr')).find(function(row) {
+            return String(row.dataset.localFolderName || '').trim() === normalizedFolderName;
+        });
+
+        if (!targetRow) targetRow = folderRow1;
+        if (!targetRow) return;
+
+        var nextFolderRow = targetRow.nextElementSibling;
+        while (nextFolderRow && !nextFolderRow.classList.contains('gtr')) {
+            nextFolderRow = nextFolderRow.nextElementSibling;
+        }
+
+        group.forEach(function(row) {
+            tbody.insertBefore(row, nextFolderRow);
+        });
+
+        var fields = getGalleryGroupFields(group);
+        if (fields && fields.tr2) {
+            fields.tr2.dataset.localFolder = String(targetRow.dataset.localFolderName || '').trim() || normalizedFolderName;
+            if (fields.folderSelect && isLocalFolderOptionValue(fields.folderSelect.value)) {
+                fields.folderSelect.value = 'local:' + fields.tr2.dataset.localFolder;
+            }
+        }
+
+        if (targetRow.__folderToggle && targetRow.__folderToggle.textContent === '[+]') {
+            group.forEach(function(row) {
+                row.style.display = 'none';
+            });
+        } else {
+            group.forEach(function(row) {
+                row.style.display = 'table-row';
+            });
+        }
+
+        sectionDiv.__updateLocalFolderGroupCounts();
+    };
+
+    sectionDiv.__rebuildLocalFolderGroups = function() {
+        var storedExpandState = getStoredLocalFolderExpandStates();
+
+        var galleryGroups = getGalleryGroupsFromTbody(tbody);
+        while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+
+        var localFolders = getLocalFolders();
+        if (!localFolders.length) localFolders = [getDefaultLocalFolderName()];
+
+        localFolders.forEach(function(folderName, index) {
+            var groupRow = createLocalFolderGroupRow(folderName, index);
+            tbody.appendChild(groupRow);
+            if (index === 0) {
+                folderRow1 = groupRow;
+                folderRight1 = groupRow.__folderRight;
+            }
+        });
+
+        galleryGroups.forEach(function(group) {
+            group.forEach(function(row) {
+                row.style.display = 'table-row';
+                tbody.appendChild(row);
+            });
+
+            var fields = getGalleryGroupFields(group);
+            var targetLocalFolder = fields ? getGalleryFieldsLocalFolderName(fields) : getDefaultLocalFolderName();
+            sectionDiv.__moveGalleryGroupToLocalFolder(group, targetLocalFolder);
+        });
+
+        Array.prototype.slice.call(tbody.querySelectorAll('tr.gtr')).forEach(function(row) {
+            var folderName = String(row.dataset.localFolderName || '').trim();
+            var expanded = Object.prototype.hasOwnProperty.call(storedExpandState, folderName) ? storedExpandState[folderName] !== false : true;
+            setFolderGroupExpanded(row, expanded);
+        });
+
+        sectionDiv.__syncLocalFolderSelectOptions();
+        sectionDiv.__updateLocalFolderGroupCounts();
+    };
 
     sectionDiv.addEventListener('click', function(e) {
         var target = e.target;
@@ -15939,6 +18904,7 @@ function createUnpublishedSection(btnRef) {
     });
 
     contentTable.appendChild(tbody);
+    sectionDiv.__rebuildLocalFolderGroups();
     sectionDiv.appendChild(contentTable);
     originalSection.parentNode.insertBefore(sectionDiv, originalSection);
 
@@ -15959,11 +18925,11 @@ function createUnpublishedSection(btnRef) {
 
     sectionDiv.querySelector('.close-custom-section').addEventListener('click', function(e) {
         e.preventDefault();
-        sectionDiv.remove();
-        if (!document.querySelector('.s[data-custom="true"]')) {
-            var btn = document.getElementById('auto-create-upload-btn');
-            if (btn) btn.style.fontWeight = 'normal';
-        }
+        Array.prototype.slice.call(tbody.querySelectorAll('tr.gtr')).forEach(function(row) {
+            if (!row.__folderToggle || row.__folderToggle.textContent !== '[+]') {
+                setFolderGroupExpanded(row, false);
+            }
+        });
     });
 
     loadSavedGalleries(tbody, folderRow1, folderRight1, sectionDiv, waitingCreateCountRef);
@@ -15987,35 +18953,35 @@ function addScanFolderButton() {
     });
     if (!createNewDiv) return;
 
-    var newDiv = document.createElement('div');
-    newDiv.style.cssText = 'display: inline-block; margin-left: 0.5em;';
-    var newLink = document.createElement('a');
-    newLink.id = 'scan-folder-btn';
-    newLink.href = '#';
-    newLink.innerHTML = '[Scan Folder List]';
-    newLink.style.fontWeight = 'normal';
-    newDiv.appendChild(newLink);
-    newDiv.appendChild(document.createTextNode(' '));
+    var scanDiv = document.createElement('div');
+    scanDiv.style.cssText = 'display: inline-block; margin-left: 0.5em;';
+    var scanLink = document.createElement('a');
+    scanLink.id = 'scan-folder-btn';
+    scanLink.href = '#';
+    scanLink.innerHTML = '[Scan Folder List]';
+    scanLink.style.fontWeight = 'normal';
+    scanDiv.appendChild(scanLink);
 
-    var localLink = document.createElement('a');
-    localLink.id = 'local-folder-btn';
-    localLink.href = '#';
-    localLink.innerHTML = '[Local Folder]';
-    localLink.style.fontWeight = 'normal';
-    newDiv.appendChild(localLink);
+    createNewDiv.insertAdjacentElement('afterend', scanDiv);
 
-    createNewDiv.insertAdjacentElement('afterend', newDiv);
-    newLink.addEventListener('click', function(e) { e.preventDefault(); scanFolders(); });
-    localLink.addEventListener('click', function(e) { e.preventDefault(); showLocalFolderUI(); });
+    scanLink.addEventListener('click', function(e) { e.preventDefault(); scanFolders(); });
 }
 
 function showLocalFolderUI() {
-    if (document.getElementById('local-folder-panel')) {
-        document.getElementById('local-folder-panel').remove();
+    var existingPanel = document.getElementById('local-folder-panel');
+    if (existingPanel) {
+        existingPanel.remove();
         return;
     }
 
-    var localFolders = getLocalFolders();
+    var folderRows = getLocalFolders().map(function(folderName) {
+        return {
+            originalName: folderName,
+            name: folderName
+        };
+    });
+    var defaultFolderName = getDefaultLocalFolderName();
+
     var panel = document.createElement('div');
     panel.id = 'local-folder-panel';
     panel.style.cssText = 'margin: 10px 0; padding: 10px; border: 1px solid #5C0D12; background-color: #E0DED3;';
@@ -16025,40 +18991,104 @@ function showLocalFolderUI() {
     titleDiv.style.cssText = 'font-weight: bold; font-size: 10pt; color: #5C0D12; margin-bottom: 10px; border-bottom: 1px solid #5C0D12; padding-bottom: 4px;';
     panel.appendChild(titleDiv);
 
+    var noteDiv = document.createElement('div');
+    noteDiv.style.cssText = 'font-size: 8.5pt; color: #5C0D12; margin-bottom: 10px; line-height: 1.5;';
+    noteDiv.textContent = '可以指定默認文件夾；新增圖庫時會先落到默認文件夾。默認文件夾不可刪除；若資料夾內仍有圖庫，也不可刪除。';
+    panel.appendChild(noteDiv);
+
+    var statusDiv = document.createElement('div');
+    statusDiv.style.cssText = 'font-size: 8.5pt; color: #5C0D12; margin-bottom: 8px; min-height: 18px;';
+    panel.appendChild(statusDiv);
+
+    function setStatus(message, isError) {
+        statusDiv.textContent = message || '';
+        statusDiv.style.color = isError ? '#CC0000' : '#5C0D12';
+    }
+
+    function getFolderNameValidationError(folderName) {
+        var name = String(folderName || '').trim();
+        if (!name) return 'Folder name cannot be empty';
+        if (name === 'Unsorted') return 'Folder name cannot be Unsorted';
+        if (name.indexOf('local:') === 0) return 'Folder name cannot start with local:';
+        return '';
+    }
+
+    function getDeleteBlockedReasonText(reason) {
+        if (reason === 'DEFAULT_FOLDER') return 'Default';
+        if (reason === 'FOLDER_NOT_EMPTY') return 'In Use';
+        if (reason === 'MIN_FOLDER_COUNT') return 'Keep One';
+        return '';
+    }
+
+    function getRowUsageCount(rowData, usageMap) {
+        var originalName = String((rowData && rowData.originalName) || '').trim();
+        var currentName = String((rowData && rowData.name) || '').trim();
+
+        if (originalName && usageMap[originalName]) return usageMap[originalName];
+        return usageMap[currentName] || 0;
+    }
+
     var table = document.createElement('table');
     table.style.cssText = 'width: 100%; border-collapse: collapse;';
     var thead = document.createElement('thead');
     var headRow = document.createElement('tr');
     var th1 = document.createElement('th'); th1.textContent = 'Folder Name'; th1.style.cssText = 'text-align: left; padding: 4px; font-size: 9pt; color: #5C0D12;';
-    var th2 = document.createElement('th'); th2.textContent = 'Display Order'; th2.style.cssText = 'width: 80px; text-align: center; padding: 4px; font-size: 9pt; color: #5C0D12;';
-    var th3 = document.createElement('th'); th3.style.cssText = 'width: 60px;';
-    headRow.appendChild(th1); headRow.appendChild(th2); headRow.appendChild(th3);
+    var th2 = document.createElement('th'); th2.textContent = 'Display Order'; th2.style.cssText = 'width: 90px; text-align: center; padding: 4px; font-size: 9pt; color: #5C0D12;';
+    var th3 = document.createElement('th'); th3.textContent = 'Galleries'; th3.style.cssText = 'width: 80px; text-align: center; padding: 4px; font-size: 9pt; color: #5C0D12;';
+    var th4 = document.createElement('th'); th4.textContent = 'Default'; th4.style.cssText = 'width: 80px; text-align: center; padding: 4px; font-size: 9pt; color: #5C0D12;';
+    var th5 = document.createElement('th'); th5.style.cssText = 'width: 90px;';
+    headRow.appendChild(th1);
+    headRow.appendChild(th2);
+    headRow.appendChild(th3);
+    headRow.appendChild(th4);
+    headRow.appendChild(th5);
     thead.appendChild(headRow);
     table.appendChild(thead);
 
     var tbody = document.createElement('tbody');
+    var defaultRadioGroupName = 'local_folder_default_group';
 
     function renderRows() {
         while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
-        localFolders.forEach(function(folder, idx) {
+
+        var persistedUsageMap = getRealtimeLocalFolderGalleryUsageMap();
+        var currentFolderNames = folderRows.map(function(rowData) {
+            return String((rowData && rowData.name) || '').trim() || String((rowData && rowData.originalName) || '').trim();
+        }).filter(function(folderName) {
+            return !!folderName;
+        });
+
+        var currentUsageMap = {};
+        folderRows.forEach(function(rowData) {
+            var currentName = String((rowData && rowData.name) || '').trim() || String((rowData && rowData.originalName) || '').trim();
+            if (!currentName) return;
+            currentUsageMap[currentName] = getRowUsageCount(rowData, persistedUsageMap);
+        });
+
+        folderRows.forEach(function(rowData, idx) {
             var tr = document.createElement('tr');
 
             var td1 = document.createElement('td');
-            td1.style.cssText = 'text-align: right; padding: 4px 15px 4px 4px;';
+            td1.style.cssText = 'text-align: left; padding: 4px 15px 4px 4px;';
             var nameInput = document.createElement('input');
             nameInput.type = 'text';
-            nameInput.value = folder;
-            nameInput.size = 50;
-            nameInput.style.cssText = 'border: 1px solid #5C0D12; background: #E0DED3; font-size: 9pt; padding: 2px 4px;';
-            if (folder === 'Waiting Create') nameInput.readOnly = true;
-            nameInput.addEventListener('change', function() { localFolders[idx] = nameInput.value; });
+            nameInput.value = rowData.name;
+            nameInput.size = 40;
+            nameInput.style.cssText = 'width: 100%; box-sizing: border-box; border: 1px solid #5C0D12; background: #E0DED3; font-size: 9pt; padding: 2px 4px;';
+            nameInput.addEventListener('input', function() {
+                var previousName = rowData.name;
+                rowData.name = nameInput.value;
+                if (String(defaultFolderName || '').trim() === String(previousName || '').trim()) {
+                    defaultFolderName = String(rowData.name || '').trim() || String(rowData.originalName || '').trim() || defaultFolderName;
+                }
+            });
             td1.appendChild(nameInput);
 
             var td2 = document.createElement('td');
             td2.style.cssText = 'text-align: center; padding: 4px;';
             var orderSelect = document.createElement('select');
             orderSelect.style.cssText = 'width: 80px; font-size: 8pt; border: 1px solid #5C0D12; background: #E0DED3;';
-            for (var i = 1; i <= localFolders.length; i++) {
+            for (var i = 1; i <= folderRows.length; i++) {
                 var opt = document.createElement('option');
                 opt.value = String(i);
                 opt.textContent = String(i);
@@ -16067,32 +19097,60 @@ function showLocalFolderUI() {
             }
             orderSelect.addEventListener('change', function() {
                 var newIdx = parseInt(orderSelect.value, 10) - 1;
-                var moved = localFolders.splice(idx, 1)[0];
-                localFolders.splice(newIdx, 0, moved);
+                var moved = folderRows.splice(idx, 1)[0];
+                folderRows.splice(newIdx, 0, moved);
                 renderRows();
+                setStatus('尚未保存本地文件夾變更', false);
             });
             td2.appendChild(orderSelect);
 
             var td3 = document.createElement('td');
-            td3.style.cssText = 'padding: 4px; text-align: center;';
-            if (folder !== 'Waiting Create') {
+            td3.style.cssText = 'text-align: center; padding: 4px; font-size: 9pt; color: #333;';
+            td3.textContent = String(getRowUsageCount(rowData, persistedUsageMap));
+
+            var td4 = document.createElement('td');
+            td4.style.cssText = 'text-align: center; padding: 4px;';
+            var defaultRadio = document.createElement('input');
+            defaultRadio.type = 'radio';
+            defaultRadio.name = defaultRadioGroupName;
+            defaultRadio.checked = String(defaultFolderName || '').trim() === (String(rowData.name || '').trim() || String(rowData.originalName || '').trim());
+            defaultRadio.style.cssText = 'margin: 0; accent-color: #5C0D12;';
+            defaultRadio.addEventListener('change', function() {
+                if (!defaultRadio.checked) return;
+                defaultFolderName = String(rowData.name || '').trim() || String(rowData.originalName || '').trim() || defaultFolderName;
+                setStatus('尚未保存默認文件夾變更', false);
+            });
+            td4.appendChild(defaultRadio);
+
+            var td5 = document.createElement('td');
+            td5.style.cssText = 'padding: 4px; text-align: center;';
+            var rowName = String(rowData.name || '').trim() || String(rowData.originalName || '').trim();
+            var deleteState = canDeleteLocalFolderName(rowName, currentFolderNames, defaultFolderName, currentUsageMap);
+
+            if (deleteState.ok) {
                 var delLink = document.createElement('a');
                 delLink.href = '#';
                 delLink.textContent = '[Delete]';
                 delLink.style.cssText = 'font-size: 9pt; color: #5C0D12;';
                 delLink.addEventListener('click', function(e) {
                     e.preventDefault();
-                    if (confirm('Are you sure you wish to delete the folder ' + folder + '?')) {
-                        localFolders.splice(idx, 1);
-                        renderRows();
-                    }
+                    folderRows.splice(idx, 1);
+                    renderRows();
+                    setStatus('尚未保存本地文件夾變更', false);
                 });
-                td3.appendChild(delLink);
+                td5.appendChild(delLink);
+            } else {
+                var blockedSpan = document.createElement('span');
+                blockedSpan.textContent = getDeleteBlockedReasonText(deleteState.reason);
+                blockedSpan.style.cssText = 'font-size: 8.5pt; color: #888;';
+                td5.appendChild(blockedSpan);
             }
 
             tr.appendChild(td1);
             tr.appendChild(td2);
             tr.appendChild(td3);
+            tr.appendChild(td4);
+            tr.appendChild(td5);
             tbody.appendChild(tr);
         });
     }
@@ -16107,7 +19165,7 @@ function showLocalFolderUI() {
     var newFolderInput = document.createElement('input');
     newFolderInput.type = 'text';
     newFolderInput.placeholder = 'New folder name';
-    newFolderInput.size = 50;
+    newFolderInput.size = 40;
     newFolderInput.style.cssText = 'border: 1px solid #5C0D12; background: #E0DED3; font-size: 9pt; padding: 2px 4px;';
 
     var createBtn = document.createElement('button');
@@ -16116,22 +19174,109 @@ function showLocalFolderUI() {
 
     createBtn.addEventListener('click', function(e) {
         e.preventDefault();
-        var name = newFolderInput.value.trim();
-        if (!name) return;
-        if (localFolders.indexOf(name) !== -1) { alert('Folder already exists'); return; }
-        localFolders.push(name);
+
+        var name = String(newFolderInput.value || '').trim();
+        var validationError = getFolderNameValidationError(name);
+        if (validationError) {
+            setStatus(validationError, true);
+            return;
+        }
+
+        var exists = folderRows.some(function(rowData) {
+            return String((rowData && rowData.name) || '').trim() === name;
+        });
+        if (exists) {
+            setStatus('Folder already exists', true);
+            return;
+        }
+
+        folderRows.push({
+            originalName: name,
+            name: name
+        });
         newFolderInput.value = '';
         renderRows();
+        setStatus('尚未保存本地文件夾變更', false);
     });
 
-    var spacer2 = document.createElement('div'); spacer2.style.cssText = 'flex: 1;';
+    var spacer2 = document.createElement('div');
+    spacer2.style.cssText = 'flex: 1;';
 
     var saveBtn = document.createElement('button');
     saveBtn.textContent = 'Save Changes';
     applyPrimaryDarkBtnStyle(saveBtn, 'padding: 4px 16px;border: none;');
     saveBtn.addEventListener('click', function(e) {
         e.preventDefault();
-        saveLocalFolders(localFolders);
+
+        var nextFolderNames = [];
+        var seen = {};
+        var renameMap = {};
+        var nextDefaultFolder = String(defaultFolderName || '').trim();
+
+        for (var i = 0; i < folderRows.length; i++) {
+            var rowData = folderRows[i];
+            var nextFolderName = String((rowData && rowData.name) || '').trim();
+            var originalFolderName = String((rowData && rowData.originalName) || '').trim();
+
+            var validationError = getFolderNameValidationError(nextFolderName);
+            if (validationError) {
+                setStatus(validationError, true);
+                return;
+            }
+
+            if (seen[nextFolderName]) {
+                setStatus('Folder name duplicated: ' + nextFolderName, true);
+                return;
+            }
+            seen[nextFolderName] = true;
+            nextFolderNames.push(nextFolderName);
+
+            if (originalFolderName && originalFolderName !== nextFolderName) {
+                renameMap[originalFolderName] = nextFolderName;
+            }
+
+            if (String(defaultFolderName || '').trim() === originalFolderName) {
+                nextDefaultFolder = nextFolderName;
+            }
+        }
+
+        if (!nextFolderNames.length) {
+            setStatus('At least one folder is required', true);
+            return;
+        }
+
+        if (!nextDefaultFolder || nextFolderNames.indexOf(nextDefaultFolder) === -1) {
+            nextDefaultFolder = nextFolderNames[0];
+        }
+
+        nextDefaultFolder = setDefaultLocalFolderName(nextDefaultFolder, nextFolderNames);
+        saveLocalFolders(nextFolderNames, nextDefaultFolder);
+
+        var renamedGalleryCount = renameSavedGalleryLocalFolders(renameMap);
+
+        folderRows = nextFolderNames.map(function(folderName) {
+            return {
+                originalName: folderName,
+                name: folderName
+            };
+        });
+        defaultFolderName = nextDefaultFolder;
+
+        renderRows();
+        setStatus('已保存，默認文件夾：' + defaultFolderName, false);
+
+        if (renamedGalleryCount > 0) {
+            opLog('更新本地圖庫文件夾引用', {
+                renamedGalleryCount: renamedGalleryCount,
+                renameMap: renameMap
+            });
+        }
+
+        opLog('保存本地文件夾管理', {
+            folders: nextFolderNames,
+            defaultFolder: defaultFolderName
+        });
+
         flashButtonSavedState(saveBtn, '已保存 ✓', 'Save Changes', 1500);
     });
 
@@ -16198,9 +19343,34 @@ function setupCreateSuccessListener() {
     if (!window.location.pathname.includes('/manage') || window.location.pathname.includes('/managegallery') || window.location.pathname.includes('/managefolders')) return;
     try {
         GM_addValueChangeListener('create_success', function(name, oldVal, newVal) {
+            uploadDebugLog('setupCreateSuccessListener:trigger', {
+                name: name,
+                oldVal: oldVal,
+                newVal: newVal
+            });
+
             if (!newVal) return;
+
+            var pendingUpload = GM_getValue('pending_upload', null);
+            var preserveFileList = !!(
+                pendingUpload &&
+                String(pendingUpload.savedDataId || '') === String(newVal || '')
+            );
+
+            uploadDebugLog('setupCreateSuccessListener:state', {
+                newVal: newVal,
+                pendingUpload: pendingUpload,
+                preserveFileList: preserveFileList
+            });
+
             var customSection = document.querySelector('.s[data-custom="true"]');
-            if (!customSection) return;
+            if (!customSection) {
+                uploadDebugWarn('setupCreateSuccessListener:no_custom_section', {
+                    newVal: newVal
+                });
+                return;
+            }
+
             var allTrs = customSection.querySelectorAll('tbody tr:not(.gtr)');
             var groups = [];
             var currentGroup = [];
@@ -16208,24 +19378,54 @@ function setupCreateSuccessListener() {
                 currentGroup.push(tr);
                 if (currentGroup.length === 2) { groups.push(currentGroup); currentGroup = []; }
             });
+
             groups.forEach(function(group) {
                 var tr2 = group[1];
                 var sid = tr2.dataset.savedDataId;
                 if (sid && sid === newVal) {
+                    uploadDebugLog('setupCreateSuccessListener:matched_group', {
+                        savedDataId: sid,
+                        preserveFileList: preserveFileList
+                    });
+
                     group.forEach(function(tr) { tr.remove(); });
                     removeSavedGalleryById(newVal);
-                    deleteGalleryFileListById(newVal);
-                    var folderStrong = customSection.querySelector('tr.gtr strong');
-                    if (folderStrong) {
-                        var count = parseInt(folderStrong.textContent, 10) || 0;
-                        folderStrong.textContent = Math.max(0, count - 1);
+
+                    if (preserveFileList) {
+                        uploadDebugWarn('setupCreateSuccessListener:preserve_file_list_for_pending_upload', {
+                            savedDataId: newVal,
+                            pendingUpload: pendingUpload
+                        });
+                    } else {
+                        deleteGalleryFileListById(newVal);
+                        uploadDebugLog('setupCreateSuccessListener:file_list_deleted', {
+                            savedDataId: newVal
+                        });
+                    }
+
+                    if (typeof customSection.__updateLocalFolderGroupCounts === 'function') {
+                        customSection.__updateLocalFolderGroupCounts();
+                    } else {
+                        var folderStrong = customSection.querySelector('tr.gtr strong');
+                        if (folderStrong) {
+                            var count = parseInt(folderStrong.textContent, 10) || 0;
+                            folderStrong.textContent = Math.max(0, count - 1);
+                        }
                     }
                 }
             });
+
             opLog('create_success 已同步移除等待項目', newVal);
+            uploadDebugLog('setupCreateSuccessListener:create_success_cleared', {
+                savedDataId: newVal
+            });
             GM_setValue('create_success', null);
         });
     } catch (e) {
+        uploadDebugError('setupCreateSuccessListener:error', {
+            message: e && e.message,
+            stack: e && e.stack
+        });
         warnLog('Listener', 'GM_addValueChangeListener 不可用', e.message);
     }
 }
@@ -16289,13 +19489,18 @@ function init() {
     setupCreateSuccessListener();
 
     window.addEventListener('resize', function() {
-        document.querySelectorAll('.s[data-custom="true"] td.gtc3').forEach(function(td) {
-            var btns = Array.from(td.querySelectorAll('button'));
-            if (btns.length > 0) alignSwapBtn(btns, td);
-        });
-        document.querySelectorAll('.s[data-custom="true"] td.gtc3 span.files-text').forEach(function(span) {
-            var td = span.closest('td');
-            if (td) alignFilesText(span, td);
+        requestAnimationFrame(function() {
+            document.querySelectorAll('.s[data-custom="true"] tbody tr:not(.gtr)').forEach(function(tr) {
+                if (tr.querySelector('td.gtc-options')) {
+                    alignGalleryRowActionButtons(tr);
+                    if (typeof tr.__positionMtlSpan === 'function') tr.__positionMtlSpan();
+                    if (typeof tr.__syncLeftGeometryToFileButtonsOnly === 'function') tr.__syncLeftGeometryToFileButtonsOnly();
+                }
+            });
+            document.querySelectorAll('.s[data-custom="true"] td.gtc3 span.files-text').forEach(function(span) {
+                var td = span.closest('td');
+                if (td) alignFilesText(span, td);
+            });
         });
     });
 }
